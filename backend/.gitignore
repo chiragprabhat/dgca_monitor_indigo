@@ -1,0 +1,42 @@
+# Virtual environment
+.venv/
+
+# Environment variables / secrets
+.env
+.env.*
+*.pem
+*.key
+secrets/
+credentials/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/*
+!logs/.gitkeep
+
+# Generated / downloaded data (keep folder structure via .gitkeep)
+data/raw/*
+data/processed/*
+data/documents/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/documents/.gitkeep
+
+# Local database files (keep folder structure via .gitkeep)
+database/*.db
+database/*.sqlite
+database/*.sqlite3
+!database/.gitkeep
+
+# Legacy Node API: dependencies, runtime data and logs
+node_api/node_modules/
+node_api/data/
+node_api/logs/

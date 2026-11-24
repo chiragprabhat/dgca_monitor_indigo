@@ -1,0 +1,63 @@
+export const API = 'http://localhost:5000/api'
+
+export async function api(path, options = {}) {
+  const res = await fetch(`${API}${path}`, {
+    ...options,
+    headers: options.body ? { 'Content-Type': 'application/json', ...options.headers } : options.headers
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`)
+  return data
+}
+
+// Sends a PDF the user picked (as raw bytes) to be stored for Document Comparison.
+export async function uploadPdf(file) {
+  const res = await fetch(`${API}/compare/upload?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/pdf' },
+    body: file
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`)
+  return data
+}
+
+// Per-browser display preferences (not shared with other users or the backend).
+const PREFS_KEY = 'dgca-display-prefs'
+const DEFAULT_PREFS = { dateFormat: 'dd-mmm-yyyy', browserNotifications: false }
+
+export function getPrefs() {
+  try {
+    return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }
+  } catch {
+    return { ...DEFAULT_PREFS }
+  }
+}
+
+export function setPrefs(patch) {
+  const next = { ...getPrefs(), ...patch }
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(next)) } catch { /* private mode */ }
+  window.dispatchEvent(new Event('dgca-prefs-changed'))
+  return next
+}
+
+export function readLocal(key, fallback) {
+  try { return localStorage.getItem(key) ?? fallback } catch { return fallback }
+}
+
+export function writeLocal(key, value) {
+  try { localStorage.setItem(key, value) } catch { /* private mode */ }
+}
+
+// Database timestamps without a zone marker represent UTC.
+export function parseDbTime(value) {
+  if (!value) return null
+  const s = String(value)
+  return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : `${s.replace(' ', 'T')}Z`)
+}
+
+export function formatDateTime(value) {
+  const d = value instanceof Date ? value : parseDbTime(value)
+  if (!d || isNaN(d)) return '—'
+  return d.toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })
+}

@@ -1,0 +1,37 @@
+CREATE TABLE IF NOT EXISTS publications (
+    publication_id   TEXT PRIMARY KEY,
+    title             TEXT NOT NULL,
+    category          TEXT NOT NULL,
+    published_date    TEXT,
+    publication_url   TEXT,
+    pdf_url           TEXT,
+    content_hash      TEXT NOT NULL,
+    document_hash     TEXT,
+    first_seen_at     TEXT NOT NULL,
+    processed_at      TEXT,
+    email_sent        BIGINT NOT NULL DEFAULT 0,
+    email_sent_at     TEXT,
+    status            TEXT NOT NULL DEFAULT 'new',
+    ai_summary               TEXT,
+    key_changes_json          TEXT,
+    effective_date              TEXT,
+    impact_level                  TEXT,
+    impacted_departments_json       TEXT,
+    recommended_actions_json          TEXT,
+    analysis_mode                       TEXT,
+    previous_publication_id               TEXT,
+    comparison_summary_json                 TEXT,
+    analyzed_at                               TEXT
+);
+
+ALTER TABLE publications
+  ADD COLUMN IF NOT EXISTS ai_summary TEXT,
+  ADD COLUMN IF NOT EXISTS key_changes_json TEXT,
+  ADD COLUMN IF NOT EXISTS effective_date TEXT,
+  ADD COLUMN IF NOT EXISTS impact_level TEXT,
+  ADD COLUMN IF NOT EXISTS impacted_departments_json TEXT,
+  ADD COLUMN IF NOT EXISTS recommended_actions_json TEXT,
+  ADD COLUMN IF NOT EXISTS analysis_mode TEXT,
+  ADD COLUMN IF NOT EXISTS previous_publication_id TEXT,
+  ADD COLUMN IF NOT EXISTS comparison_summary_json TEXT,
+  ADD COLUMN IF NOT EXISTS analyzed_at TEXT;

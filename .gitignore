@@ -1,0 +1,52 @@
+# Virtual environment
+.venv/
+
+# Node.js
+node_modules/
+
+# Environment variables / secrets
+.env
+.env.*
+*.pem
+*.key
+secrets/
+credentials/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Build output
+frontend/dist/
+build/
+dist/
+*.egg-info/
+
+# Backend runtime data (see backend/.gitignore for the keep-folder rules)
+backend/data/raw/*
+backend/data/processed/*
+backend/data/documents/*
+backend/database/*.db
+backend/database/*.sqlite
+backend/database/*.sqlite3
+backend/database/*-wal
+backend/database/*-shm
+backend/database/sqlite-backup/
+backend/logs/*
+backend/node_api/data/
+backend/node_api/logs/
+!backend/**/.gitkeep
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
