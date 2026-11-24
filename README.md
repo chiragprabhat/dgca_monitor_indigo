@@ -25,6 +25,7 @@ The repository has two top-level folders:
 
 The API and Python pipeline use Neon PostgreSQL. Set `DATABASE_URL` before
 starting either backend. See the [database setup and cutover guide](docs/DATABASE_MIGRATION.md).
+For a hosted frontend and automated monitoring, see the [production deployment guide](docs/PRODUCTION_DEPLOYMENT.md).
 
 Nothing in this repository installs software for you. Install what you need yourself:
 
@@ -70,7 +71,7 @@ npm install
 npm run dev                                  # http://localhost:5173
 ```
 
-The dashboard calls the API at `http://localhost:5000`, so open it on the same PC.
+The local Vite dashboard proxies API requests to Express on port 5000.
 Keep the API terminal open: monitoring runs only while it is running.
 
 ---
@@ -326,7 +327,7 @@ PDF of every Part in force, in full. Revoked Parts are listed but have no docume
 ## Current limitations
 
 - Built and tested on Windows only.
-- The web dashboard calls the API at `http://localhost:5000`, so open it on the same PC.
+- The default Vite development setup reaches a local Express server on port 5000.
 - No Windows Service or background task. The API, the Python monitor and the dashboards
   run only while their terminals are open.
 - If DGCA changes its page layout, the scraper logs an error and stores nothing

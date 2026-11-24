@@ -5,7 +5,7 @@ import { fetchPdfWithText } from './pdf-service.js';
 import { analyzePublication, formatDate } from './summary-service.js';
 import { todayIST } from './priority-service.js';
 import { getSettings } from './settings-service.js';
-import { getDatabase } from '../config/database.js';
+import { acquireMonitoringLock, getDatabase } from '../config/database.js';
 import { createLogger } from '../utils/logger.js';
 import { compareWithPrevious } from './revision-service.js';
 
@@ -16,22 +16,32 @@ const SECTION_LABELS = { tenders: 'Tenders', regulation: 'Regulation', guidance:
 
 const BACKFILL_PER_CYCLE = 12;
 
-let isMonitoring = false;
-
-export async function checkForUpdates() {
-  if (isMonitoring) {
-    logger.warn('Monitoring already in progress, skipping this cycle');
-    return { success: false, error: 'Monitoring already in progress' };
-  }
-
-  isMonitoring = true;
+export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) {
   const startTime = Date.now();
+  let lock;
 
   try {
+    lock = await acquireMonitoringLock();
+    if (!lock) {
+      logger.warn('Monitoring already in progress, skipping this cycle');
+      return scheduledSlot
+        ? { success: true, skipped: true, reason: 'Monitor is busy' }
+        : { success: false, error: 'Monitoring already in progress' };
+    }
+    if (scheduledSlot) {
+      const claim = await getDatabase().query(`
+        INSERT INTO config (key, value) VALUES ('scheduled_monitor_last_slot', $1)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = dgca_utc_now()
+        WHERE config.value < EXCLUDED.value
+      `, [scheduledSlot]);
+      if (!claim.rowCount) return { success: true, skipped: true, reason: 'Slot already claimed' };
+      onScheduledStart?.();
+    }
     logger.info('Starting DGCA website monitoring...');
     await initializeEmailService();
 
     const scrapeResult = await scrapeAllSections();
+    lock.assertHeld();
     if (!scrapeResult.success) {
       logger.error('Scraping failed', { error: scrapeResult.error });
       await logMonitoringRun('failed', 0, 0, Date.now() - startTime, scrapeResult.error);
@@ -40,6 +50,7 @@ export async function checkForUpdates() {
 
     const newIds = [];
     for (const item of scrapeResult.items) {
+      lock.assertHeld();
       const result = await saveUpdate(item);
       if (result.isNew) newIds.push(result.id);
     }
@@ -50,13 +61,15 @@ export async function checkForUpdates() {
     if (pending.length > newIds.length) logger.info(`Resuming ${pending.length - newIds.length} publication(s) left unsent by an earlier cycle`);
     let notificationsSent = 0;
     for (const update of pending) {
+      lock.assertHeld();
       try {
-        if (await processNewUpdate(update)) notificationsSent++;
+        if (await processNewUpdate(update, lock.assertHeld)) notificationsSent++;
       } catch (error) {
         logger.warn('Processing failed, will retry next cycle', { id: update.id, error: error.message });
       }
     }
 
+    lock.assertHeld();
     await backfillAnalysis(BACKFILL_PER_CYCLE);
 
     const duration = Date.now() - startTime;
@@ -76,12 +89,12 @@ export async function checkForUpdates() {
     await logMonitoringRun('failed', 0, 0, duration, error.message);
     return { success: false, error: error.message, duration };
   } finally {
-    isMonitoring = false;
+    await lock?.release();
   }
 }
 
 // Analyses one newly detected publication and emails it if it was published today. Returns true if emailed.
-async function processNewUpdate(update) {
+async function processNewUpdate(update, assertHeld) {
   const { pdf, analysis } = await analyze(update);
   const title = update.title.slice(0, 80);
   const stored = await getDatabase().prepare('SELECT * FROM updates WHERE id = $1').get(update.id);
@@ -111,7 +124,8 @@ async function processNewUpdate(update) {
     return false;
   }
 
-  const result = await sendNotification({ ...update, revision }, { analysis, pdf });
+  const result = await sendNotification({ ...update, revision }, { analysis, pdf, assertHeld, automatic: true });
+  if (result.alreadyAttempted) return false;
   await setEmailStatus(update.id, result.success ? `sent ${new Date().toISOString()}` : `failed - ${result.error}`);
   return result.success;
 }

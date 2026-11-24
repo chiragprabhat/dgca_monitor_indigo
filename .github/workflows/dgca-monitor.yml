@@ -1,0 +1,38 @@
+name: DGCA monitoring
+
+on:
+  schedule:
+    - cron: '0,15,30,45 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: dgca-production-monitor
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    if: vars.DGCA_MONITOR_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ${{ vars.DGCA_MONITOR_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 2
+    steps:
+      - name: Request scheduled check
+        shell: bash
+        env:
+          API_ORIGIN: ${{ vars.DGCA_MONITOR_API_ORIGIN }}
+          TRIGGER_TOKEN: ${{ secrets.MONITOR_TRIGGER_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$API_ORIGIN" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?/?$ || -z "$TRIGGER_TOKEN" ]]; then
+            echo 'Configure DGCA_MONITOR_API_ORIGIN and the MONITOR_TRIGGER_TOKEN secret.'
+            exit 1
+          fi
+          status="$(curl --silent --show-error --proto '=https' --max-time 30 --request POST \
+            --header "Authorization: Bearer $TRIGGER_TOKEN" --output /dev/null --write-out '%{http_code}' \
+            "${API_ORIGIN%/}/api/monitor/scheduled")"
+          if [[ "$status" != 202 ]]; then
+            echo "Monitoring request failed with HTTP $status."
+            exit 1
+          fi
+          echo 'Monitoring trigger acknowledged. Check the app monitoring log for cycle results.'

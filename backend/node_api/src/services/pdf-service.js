@@ -15,11 +15,12 @@ const MAX_PDF_BYTES = 40 * 1024 * 1024;
 export const SUMMARY_PAGES = 30;
 const MAX_TEXT_PAGES = SUMMARY_PAGES;
 
-export async function downloadPdf(url) {
+export async function downloadPdf(url, { beforeRedirect } = {}) {
   const response = await axios.get(url, {
     responseType: 'arraybuffer',
     timeout: 60000,
     maxContentLength: MAX_PDF_BYTES,
+    beforeRedirect,
     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
   });
 
@@ -60,7 +61,7 @@ export async function extractText(buffer, maxPages = MAX_TEXT_PAGES) {
 }
 
 // Downloads and reads a publication's PDF; never throws, so a bad PDF can't block an alert.
-export async function fetchPdfWithText(url, { maxPages = MAX_TEXT_PAGES } = {}) {
+export async function fetchPdfWithText(url, { maxPages = MAX_TEXT_PAGES, beforeRedirect } = {}) {
   if (!url) return null;
   try {
     let pdf;
@@ -68,7 +69,7 @@ export async function fetchPdfWithText(url, { maxPages = MAX_TEXT_PAGES } = {}) 
     for (const wait of [0, 3000, 8000]) {
       if (wait) await new Promise(resolve => setTimeout(resolve, wait));
       try {
-        pdf = await downloadPdf(url);
+        pdf = await downloadPdf(url, { beforeRedirect });
         break;
       } catch (error) {
         if (wait === 8000) throw error;

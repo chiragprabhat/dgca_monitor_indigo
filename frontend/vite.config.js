@@ -1,23 +1,29 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// The dashboard is served on this PC only (127.0.0.1), never on the office network.
-// `npm run build` + `npm run preview` serve the built files; `server` applies only
-// when a developer runs the dev server (`npm run dev`) by hand.
-export default defineConfig({
-  plugins: [react()],
-  server: {
+export default defineConfig(({ command, mode }) => {
+  if (command === 'build' && process.env.VERCEL) {
+    const { VITE_API_BASE_URL } = loadEnv(mode, process.cwd(), 'VITE_')
+    let api
+    try { api = new URL(VITE_API_BASE_URL) } catch { /* Report invalid config without exposing its value. */ }
+    if (!api || api.protocol !== 'https:' || api.username || api.password || api.search || api.hash ||
+        api.pathname.replace(/\/+$/, '') !== '/api') {
+      throw new Error('Set VITE_API_BASE_URL to the public HTTPS backend URL ending in /api')
+    }
+  }
+  const localServer = {
     host: '127.0.0.1',
     port: 5173,
-    strictPort: true
-  },
-  preview: {
-    host: '127.0.0.1',
-    port: 5173,
-    strictPort: true
-  },
-  build: {
-    outDir: 'dist',
-    sourcemap: false
+    strictPort: true,
+    proxy: { '/api': 'http://127.0.0.1:5000' }
+  }
+  return {
+    plugins: [react()],
+    server: localServer,
+    preview: localServer,
+    build: {
+      outDir: 'dist',
+      sourcemap: false
+    }
   }
 })

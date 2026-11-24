@@ -1,7 +1,8 @@
-export const API = 'http://localhost:5000/api'
+export const API = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/+$/, '') || '/api'
 
 export async function api(path, options = {}) {
   const res = await fetch(`${API}${path}`, {
+    credentials: 'include',
     ...options,
     headers: options.body ? { 'Content-Type': 'application/json', ...options.headers } : options.headers
   })
@@ -14,6 +15,7 @@ export async function api(path, options = {}) {
 export async function uploadPdf(file) {
   const res = await fetch(`${API}/compare/upload?name=${encodeURIComponent(file.name)}`, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/pdf' },
     body: file
   })

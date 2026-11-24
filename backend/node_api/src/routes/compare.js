@@ -8,6 +8,8 @@ import { MAX_UPLOAD_BYTES, storeUpload, listUploads, deleteUpload, loadUpload } 
 const router = express.Router();
 
 const ALLOWED_HOSTS = new Set(['www.dgca.gov.in', 'dgca.gov.in']);
+const isDgcaDestination = ({ protocol, hostname, port }) =>
+  protocol === 'https:' && ALLOWED_HOSTS.has(hostname) && (!port || String(port) === '443');
 
 // "car:CAR S8 O 2" is a Civil Aviation Requirement in force, "upload:<id>" a PDF the user uploaded;
 // anything else is a stored publication.
@@ -47,10 +49,14 @@ async function loadCar(carId) {
 async function loadByUrl(raw) {
   let url;
   try { url = new URL(raw); } catch { throw Object.assign(new Error('Not a valid link'), { status: 400 }); }
-  if (url.protocol !== 'https:' || !ALLOWED_HOSTS.has(url.hostname)) {
+  if (!isDgcaDestination(url) || url.username || url.password) {
     throw Object.assign(new Error('Only https://www.dgca.gov.in PDF links can be compared'), { status: 400 });
   }
-  const pdf = await fetchPdfWithText(url.href);
+  const pdf = await fetchPdfWithText(url.href, {
+    beforeRedirect: destination => {
+      if (!isDgcaDestination(destination) || destination.auth) throw new Error('DGCA PDF redirect rejected');
+    }
+  });
   if (!pdf) throw Object.assign(new Error('Could not download a PDF from that link'), { status: 502 });
   return { label: pdf.filename, published: null, section: null, pages: pdf.pageCount, text: pdf.text };
 }

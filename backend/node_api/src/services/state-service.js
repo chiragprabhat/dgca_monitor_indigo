@@ -151,7 +151,7 @@ export function analysisFromRow(row) {
 // Shape returned by the API: JSON columns parsed, analysis fields at top level.
 export function toApiUpdate(row) {
   const analysis = analysisFromRow(row);
-  const { analysis: _raw, pdf_text: text, revision, pdf_text_full: _full, ...rest } = row;
+  const { analysis: _raw, pdf_text: text, revision, pdf_text_full: _full, email_delivery_started_at: _claim, ...rest } = row;
   return {
     ...rest,
     revision: revision ? JSON.parse(revision) : null,
@@ -173,9 +173,23 @@ export async function setEmailStatus(updateId, status) {
   await getDatabase().prepare('UPDATE updates SET email_status = $1 WHERE id = $2').run(status, updateId);
 }
 
-// Publications never given an email decision: new this cycle, or left over from a cycle that was interrupted.
+const PENDING_DELIVERY = `email_status IS NULL AND email_delivery_started_at IS NULL
+  AND COALESCE(is_notified, 0) = 0
+  AND NOT EXISTS (SELECT 1 FROM notifications WHERE update_id = updates.id AND status = 'sent')`;
+
+// An attempt is durable before contacting SMTP. An interrupted attempt must be reviewed
+// before an operator explicitly resends it, since SMTP may already have accepted it.
+export async function claimEmailDelivery(updateId) {
+  const result = await getDatabase().prepare(`
+    UPDATE updates SET email_delivery_started_at = dgca_utc_now()
+    WHERE id = $1 AND ${PENDING_DELIVERY}
+  `).run(updateId);
+  return result.changes === 1;
+}
+
 export async function getPendingEmailUpdates() {
-  return await getDatabase().prepare('SELECT * FROM updates WHERE email_status IS NULL ORDER BY detected_at ASC NULLS FIRST').all();
+  return await getDatabase().prepare(`SELECT * FROM updates WHERE ${PENDING_DELIVERY}
+    ORDER BY detected_at ASC NULLS FIRST`).all();
 }
 
 // The monitor's backfill skips archive imports; the archive worker analyses those.

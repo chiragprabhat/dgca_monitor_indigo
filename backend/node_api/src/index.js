@@ -1,3 +1,5 @@
+import 'dotenv/config';
+
 // Polyfill for File API (needed for undici compatibility with Node 18.17.0)
 if (typeof globalThis.File === 'undefined') {
   globalThis.File = class File {
@@ -11,16 +13,16 @@ if (typeof globalThis.File === 'undefined') {
 
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { initializeDatabase } from './config/database.js';
+import { initializeDatabase, requireDirectMonitoringConnection } from './config/database.js';
+import { createAccessPolicy } from './config/access.js';
 import { backfillRevisionKeys } from './services/revision-service.js';
 import { createLogger } from './utils/logger.js';
-import { startScheduler } from './services/scheduler-service.js';
+import { getGitHubMonitoringSlot, startScheduler } from './services/scheduler-service.js';
 import updatesRoutes from './routes/updates.js';
 import sectionsRoutes from './routes/sections.js';
-import monitorsRoutes from './routes/monitor.js';
+import monitorsRoutes, { scheduledMonitor } from './routes/monitor.js';
 import notificationsRoutes from './routes/notifications.js';
 import settingsRoutes from './routes/settings.js';
 import systemRoutes from './routes/system.js';
@@ -33,39 +35,42 @@ import { startAnalysis } from './services/archive-service.js';
 import axios from 'axios';
 import { getHttpsAgent } from './utils/system-ca.js';
 
-dotenv.config();
+if (process.env.VERCEL) throw new Error('The full DGCA Express API requires a long-running host');
 
 // DGCA page and PDF downloads trust the same certificates as Windows (see utils/system-ca.js).
 axios.defaults.httpsAgent = getHttpsAgent();
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const logger = createLogger('index');
 
 const app = express();
+const access = createAccessPolicy();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
-// The dashboard may be opened as localhost or 127.0.0.1 (start_dashboard.ps1 serves it on
-// 127.0.0.1); FRONTEND_URL can add more addresses, comma-separated.
-const allowedOrigins = [...new Set([
-  ...String(process.env.FRONTEND_URL || '').split(',').map(s => s.trim()).filter(Boolean),
-  'http://localhost:5173',
-  'http://127.0.0.1:5173'
-])];
+app.disable('x-powered-by');
+if (access.production) app.set('trust proxy', 'loopback');
+app.use('/api', (req, res, next) => {
+  res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  next();
+});
+app.use('/api', access.requireHttps);
 app.use(cors({
-  origin: allowedOrigins,
+  origin: [...access.allowedOrigins],
   credentials: true
 }));
+app.post('/api/monitor/scheduled', access.requireScheduledTrigger, scheduledMonitor);
+app.use('/api', access.requireOperator);
 app.use(express.json());
 
 // Initialize Database
 try {
+  if (access.production || process.env.MONITOR_SCHEDULER === 'github') requireDirectMonitoringConnection();
   await initializeDatabase();
   await backfillRevisionKeys();
+  if (process.env.MONITOR_SCHEDULER === 'github') await getGitHubMonitoringSlot();
   logger.info('Database initialized successfully');
 } catch (error) {
-  logger.error('Database initialization failed:', error);
+  logger.error(`Startup checks failed: ${error.message}`);
   process.exit(1);
 }
 
@@ -92,9 +97,10 @@ app.get('/api/health', (req, res) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  logger.error('Express error:', err);
-  res.status(err.status || 500).json({
-    error: err.message || 'Internal Server Error',
+  const status = err.status || 500;
+  logger.error('Express error', { status, type: err.name });
+  res.status(status).json({
+    error: (access.production && status >= 500) ? 'Internal Server Error' : err.message || 'Internal Server Error',
     timestamp: new Date().toISOString()
   });
 });
@@ -108,13 +114,11 @@ app.use((req, res) => {
 });
 
 // Start Server
-// Local-only by default: the API can change alert recipients, so other PCs on
-// the network shouldn't reach it. Set HOST=0.0.0.0 to share it deliberately.
-const HOST = process.env.HOST || '127.0.0.1';
-if (!process.env.VERCEL) {
+const HOST = access.host;
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   app.listen(PORT, HOST, async () => {
     logger.info(`Server running on http://localhost:${PORT} (listening on ${HOST})`);
-    logger.info('Starting DGCA monitoring scheduler...');
+    logger.info(process.env.MONITOR_SCHEDULER === 'github' ? 'Waiting for GitHub monitoring triggers' : 'Starting DGCA monitoring scheduler');
     await startScheduler();
     // Finish analysing any archive imports left over from before a restart.
     setTimeout(startAnalysis, 60000);

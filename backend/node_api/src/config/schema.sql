@@ -135,11 +135,13 @@ ALTER TABLE updates
   ADD COLUMN IF NOT EXISTS review_owner TEXT,
   ADD COLUMN IF NOT EXISTS review_note TEXT,
   ADD COLUMN IF NOT EXISTS reviewed_at TEXT,
-  ADD COLUMN IF NOT EXISTS pdf_text_full BIGINT DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS pdf_text_full BIGINT DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS email_delivery_started_at TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_attach_id ON updates(attach_id);
 CREATE INDEX IF NOT EXISTS idx_origin ON updates(origin);
 CREATE INDEX IF NOT EXISTS idx_revision_key ON updates(revision_key);
+CREATE INDEX IF NOT EXISTS idx_notifications_update_sent ON notifications(update_id) WHERE status = 'sent';
 
 CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA public;
 DO $$

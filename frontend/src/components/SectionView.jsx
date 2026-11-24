@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import './SectionView.css'
+import { api } from '../api'
 
 function SectionView({ section, onBack }) {
   const [updates, setUpdates] = useState([])
@@ -14,10 +15,7 @@ function SectionView({ section, onBack }) {
   const fetchUpdates = async () => {
     try {
       const offset = page * limit
-      const res = await fetch(
-        `http://localhost:5000/api/sections/${section}?limit=${limit}&offset=${offset}`
-      )
-      const data = await res.json()
+      const data = await api(`/sections/${section}?limit=${limit}&offset=${offset}`)
       setUpdates(data.data)
     } catch (error) {
       console.error('Error fetching section updates:', error)

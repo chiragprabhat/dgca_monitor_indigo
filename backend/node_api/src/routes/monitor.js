@@ -1,12 +1,26 @@
 import { asyncRoute } from '../utils/async-route.js';
 import express from 'express';
 import { checkForUpdates } from '../services/monitor-service.js';
-import { getSchedulerStatus } from '../services/scheduler-service.js';
+import { getGitHubMonitoringSlot, getSchedulerStatus } from '../services/scheduler-service.js';
 import { getRecentLogs } from '../services/state-service.js';
 import { testEmailConnection, isEmailEnabled } from '../services/notification-service.js';
 import { getDatabase } from '../config/database.js';
 
 const router = express.Router();
+
+export const scheduledMonitor = asyncRoute(async (req, res) => {
+  const scheduledSlot = await getGitHubMonitoringSlot();
+  if (!scheduledSlot) return res.status(202).json({ accepted: false, reason: 'Outside the monitoring window' });
+
+  // The long-running host continues the check after the Actions job receives its acknowledgement.
+  const result = await checkForUpdates({
+    scheduledSlot,
+    onScheduledStart: () => res.status(202).json({ accepted: true })
+  });
+  if (res.headersSent) return;
+  if (result.skipped) return res.status(202).json({ accepted: false, reason: result.reason });
+  res.status(503).json({ accepted: false, reason: 'Unable to start monitoring' });
+});
 
 router.post('/trigger', async (req, res) => {
   try {

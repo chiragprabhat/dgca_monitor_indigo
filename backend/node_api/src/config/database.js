@@ -57,6 +57,50 @@ export function getDatabase() {
   return database(getPool());
 }
 
+export function requireDirectMonitoringConnection() {
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+  if (new URL(process.env.DATABASE_URL).hostname.includes('-pooler.')) {
+    throw new Error('DGCA monitoring requires a direct Neon DATABASE_URL for its session lock');
+  }
+}
+
+// Keep the lock on one dedicated PostgreSQL session for the whole run.
+export async function acquireMonitoringLock() {
+  requireDirectMonitoringConnection();
+  const client = await getPool().connect();
+  let connectionError;
+  const rememberError = error => { connectionError = error; };
+  client.on('error', rememberError);
+  function dispose(error) {
+    client.release(error);
+    client.off('error', rememberError);
+  }
+  try {
+    const { rows: [row] } = await client.query('SELECT pg_try_advisory_lock(13691, 4) AS acquired');
+    if (!row.acquired) {
+      dispose();
+      return null;
+    }
+  } catch (error) {
+    dispose(error);
+    throw error;
+  }
+  return {
+    assertHeld() {
+      if (connectionError) throw new Error('Lost the DGCA monitoring lock connection');
+    },
+    async release() {
+      try {
+        if (!connectionError) await client.query('SELECT pg_advisory_unlock(13691, 4)');
+      } catch (error) {
+        connectionError = error;
+      } finally {
+        dispose(connectionError);
+      }
+    }
+  };
+}
+
 export async function transaction(callback) {
   const client = await getPool().connect();
   let releaseError;

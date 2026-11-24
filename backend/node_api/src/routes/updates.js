@@ -69,6 +69,8 @@ router.get('/:id/email-preview', asyncRoute(async (req, res) => {
   const row = await getDatabase().prepare('SELECT * FROM updates WHERE id = $1').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Update not found' });
   const email = renderEmail(row, analysisFromRow(row));
+  res.set('Content-Security-Policy',
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'");
   res.type('html').send(email.html);
 }));
 

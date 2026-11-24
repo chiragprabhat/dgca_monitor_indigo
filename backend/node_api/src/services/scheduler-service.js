@@ -16,13 +16,39 @@ async function settings() {
   };
 }
 
-async function schedule() {
-  const { minutes, startHour, endHour } = await settings();
+function scheduleExpression({ minutes, startHour, endHour }) {
   // Fields: second minute hour day month weekday. Steps under an hour go in the
   // minute field; longer intervals step through the hour field.
-  const cronExpression = minutes < 60
+  return minutes < 60
     ? `0 */${minutes} ${startHour}-${endHour} * * *`
     : `0 0 ${startHour}-${endHour}/${Math.round(minutes / 60)} * * *`;
+}
+
+export async function getGitHubMonitoringSlot(now = new Date()) {
+  const { minutes, startHour, endHour } = await settings();
+  if (minutes < 60 && (minutes < 15 || minutes % 15 !== 0)) {
+    throw new Error('MONITOR_SCHEDULER=github requires sub-hour intervals in multiples of 15 minutes');
+  }
+  if (!(startHour >= 0 && endHour <= 23 && startHour <= endHour)) {
+    throw new Error('Set MONITOR_START_HOUR and MONITOR_END_HOUR to a valid IST hour window');
+  }
+  const istOffset = 330 * 60000;
+  const current = new Date(now.getTime() + istOffset);
+  const hour = current.getUTCHours();
+  if (hour < startHour || hour > endHour) return null;
+  if (minutes < 60) {
+    current.setUTCMinutes(Math.floor(current.getUTCMinutes() / minutes) * minutes, 0, 0);
+  } else {
+    const stepHours = Math.round(minutes / 60);
+    current.setUTCHours(startHour + Math.floor((hour - startHour) / stepHours) * stepHours, 0, 0, 0);
+  }
+  return new Date(current.getTime() - istOffset).toISOString();
+}
+
+async function schedule() {
+  const config = await settings();
+  const { minutes, startHour, endHour } = config;
+  const cronExpression = scheduleExpression(config);
 
   if (scheduledJob) scheduledJob.destroy();
   // noOverlap: a check still running when the next one is due is not started twice.
@@ -36,6 +62,7 @@ async function schedule() {
 }
 
 export async function startScheduler() {
+  if (process.env.MONITOR_SCHEDULER === 'github') return true;
   try {
     await schedule();
     setTimeout(async () => {
@@ -51,6 +78,7 @@ export async function startScheduler() {
 
 // Called after the check interval is changed in Settings.
 export async function restartScheduler() {
+  if (process.env.MONITOR_SCHEDULER === 'github') return;
   await schedule();
 }
 
@@ -63,12 +91,14 @@ export function stopScheduler() {
 }
 
 export async function getSchedulerStatus() {
-  const { minutes, startHour, endHour } = await settings();
+  const config = await settings();
+  const { minutes, startHour, endHour } = config;
+  const external = process.env.MONITOR_SCHEDULER === 'github';
   return {
-    running: scheduledJob !== null,
+    running: external || scheduledJob !== null,
     intervalMinutes: minutes,
     startHour,
     endHour,
-    cron: activeExpression
+    cron: external ? scheduleExpression(config) : activeExpression
   };
 }

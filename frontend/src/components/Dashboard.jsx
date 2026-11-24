@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import './Dashboard.css'
+import { api } from '../api'
 
 function Dashboard({ stats, onSectionClick }) {
   const [updates, setUpdates] = useState([])
@@ -24,8 +25,7 @@ function Dashboard({ stats, onSectionClick }) {
 
   const fetchUpdates = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/updates?limit=10')
-      const data = await res.json()
+      const data = await api('/updates?limit=10')
       setUpdates(data.data || [])
       setMetrics(prev => ({ ...prev, totalChecks: (data.data || []).length }))
     } catch (error) {
@@ -37,10 +37,8 @@ function Dashboard({ stats, onSectionClick }) {
 
   const fetchMetrics = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/health')
-      if (res.ok) {
-        setSystemHealth('healthy')
-      }
+      await api('/health')
+      setSystemHealth('healthy')
     } catch {
       setSystemHealth('healthy')
     }

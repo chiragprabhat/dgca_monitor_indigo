@@ -1,10 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 
-const LOG_DIR = process.env.LOG_DIR || './logs';
+const LOG_DIR = process.env.VERCEL ? null : process.env.LOG_DIR || './logs';
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
-if (!fs.existsSync(LOG_DIR)) {
+if (LOG_DIR && !fs.existsSync(LOG_DIR)) {
   fs.mkdirSync(LOG_DIR, { recursive: true });
 }
 
@@ -53,6 +53,7 @@ export function createLogger(module) {
 }
 
 function appendLog(message, level) {
+  if (!LOG_DIR) return;
   const logFile = path.join(LOG_DIR, 'application.log');
   try {
     fs.appendFileSync(logFile, message + '\n');

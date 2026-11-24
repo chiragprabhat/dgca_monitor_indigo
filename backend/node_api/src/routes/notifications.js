@@ -1,6 +1,6 @@
 import { asyncRoute } from '../utils/async-route.js';
 import express from 'express';
-import { getDatabase } from '../config/database.js';
+import { acquireMonitoringLock, getDatabase } from '../config/database.js';
 import { getNotificationHistory, getEmailConfiguration, validateEmailConfig, sendNotification, isEmailEnabled } from '../services/notification-service.js';
 import { analyzeAndPrepare } from '../services/monitor-service.js';
 import { setEmailStatus } from '../services/state-service.js';
@@ -28,10 +28,16 @@ router.post('/test/:id?', asyncRoute(async (req, res) => {
     : await db.prepare(`SELECT * FROM updates ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, publication_date DESC NULLS LAST LIMIT 1`).get();
   if (!row) return res.status(404).json({ success: false, error: 'Update not found' });
 
-  const { pdf, analysis } = await analyzeAndPrepare(row);
-  const result = await sendNotification(row, { analysis, pdf });
-  await setEmailStatus(row.id, result.success ? `sent (test) ${new Date().toISOString()}` : `failed - ${result.error}`);
-  res.status(result.success ? 200 : 502).json({ ...result, timestamp: new Date().toISOString() });
+  const lock = await acquireMonitoringLock();
+  if (!lock) return res.status(409).json({ success: false, error: 'A monitoring or email operation is already in progress' });
+  try {
+    const { pdf, analysis } = await analyzeAndPrepare(row);
+    const result = await sendNotification(row, { analysis, pdf, assertHeld: lock.assertHeld });
+    await setEmailStatus(row.id, result.success ? `sent (test) ${new Date().toISOString()}` : `failed - ${result.error}`);
+    res.status(result.success ? 200 : 502).json({ ...result, timestamp: new Date().toISOString() });
+  } finally {
+    await lock.release();
+  }
 }));
 
 export default router;

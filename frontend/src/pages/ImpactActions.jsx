@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import './Pages.css'
+import { api } from '../api'
 import { DeadlineText, formatDate, pdfUrl } from '../components/Priority'
 import { ReviewControl, RevisionPanel, REVIEW_STATUSES } from '../components/Review'
 
@@ -15,8 +16,7 @@ function ImpactActions({ onNavigate }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('http://localhost:5000/api/updates?sort=priority&limit=5000')
-      .then(r => r.json())
+    api('/updates?sort=priority&limit=5000')
       .then(data => {
         setItems((data.data || []).filter(u => u.priority))
         setLoading(false)

@@ -32,12 +32,6 @@ The foreign key from notifications to updates and existing primary keys, unique 
 
 ## Deployment and tests
 
-Keep `DATABASE_URL` server-side. For a Vercel-hosted Express API, set a pooled URL as a server environment variable. The existing app export can serve the HTTP routes. A long-running host is required for Express background timers and jobs that outlive a request. The React client in this checkout still uses its pre-existing localhost API URL, so a remote browser deployment requires its own API-origin configuration. [Express on Vercel](https://vercel.com/docs/frameworks/backend/express)
-
-In the planned GitHub Actions monitoring job, map the repository secret `DATABASE_URL` to the job's environment and install `backend/requirements.txt`. Keep the existing schedule and provider settings. For an Actions job that runs one Python cycle, run the following from `backend`:
-
-```bash
-python -c 'from pipeline.scheduler import run_once; result = run_once(); print(result); raise SystemExit(result["status"] == "error")'
-```
+Keep the direct `DATABASE_URL` on the Express host. The GitHub Actions workflow triggers that host over HTTPS with a dedicated token. Vercel serves the frontend. See the [production deployment guide](PRODUCTION_DEPLOYMENT.md) for setup and operational limits.
 
 Run `python -m unittest discover -s tests -t .` from `backend` with `TEST_DATABASE_URL` set to exercise PostgreSQL storage, scheduling, and publication processing.

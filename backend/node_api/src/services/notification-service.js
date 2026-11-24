@@ -1,7 +1,7 @@
 import nodemailer from 'nodemailer';
 import { getDatabase } from '../config/database.js';
 import { createLogger } from '../utils/logger.js';
-import { markAsNotified } from './state-service.js';
+import { claimEmailDelivery, markAsNotified } from './state-service.js';
 import { daysUntil } from './priority-service.js';
 import { formatDate } from './summary-service.js';
 import { getSettings } from './settings-service.js';
@@ -88,7 +88,7 @@ export async function initializeEmailService() {
 }
 
 // update: a row from the updates table. analysis/pdf come from the monitor cycle.
-export async function sendNotification(update, { analysis, pdf } = {}) {
+export async function sendNotification(update, { analysis, pdf, automatic, assertHeld } = {}) {
   if (!await isEmailEnabled()) {
     return { success: false, skipped: true, error: 'Email notifications disabled (EMAIL_NOTIFICATIONS_ENABLED is not true)' };
   }
@@ -111,6 +111,10 @@ export async function sendNotification(update, { analysis, pdf } = {}) {
     attachmentNote = `PDF too large to attach (${(pdf.buffer.length / 1048576).toFixed(1)} MB) - link only`;
   }
 
+  assertHeld?.();
+  const claimed = await claimEmailDelivery(update.id);
+  if (automatic && !claimed) return { success: false, alreadyAttempted: true };
+  assertHeld?.();
   try {
     const info = await transporter.sendMail({
       from: { name: senderName(), address: senderAddress() },

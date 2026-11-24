@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import './Pages.css'
+import { API, api } from '../api'
 import { PriorityBadge, DeadlineText, formatDate, pdfUrl } from '../components/Priority'
 import { ReviewBadge, ReviewControl, RevisionPanel, REVIEW_STATUSES } from '../components/Review'
 
@@ -22,8 +23,7 @@ function DGCAUpdates({ initialCategory, onNavigate }) {
   useEffect(() => { setShown(PAGE) }, [searchTerm, selectedCategory, selectedPriority, sortBy, source, review])
 
   useEffect(() => {
-    fetch('http://localhost:5000/api/updates?limit=5000')
-      .then(r => r.json())
+    api('/updates?limit=5000')
       .then(data => {
         setUpdates(data.data || [])
         setLoading(false)
@@ -151,7 +151,7 @@ function DGCAUpdates({ initialCategory, onNavigate }) {
                           {update.deadline && <><DeadlineText deadline={update.deadline} /> • </>}
                           Email: {update.email_status || 'not processed'}
                           {pdfUrl(update) && <> • <a href={pdfUrl(update)} target="_blank" rel="noreferrer">Open PDF</a></>}
-                          {' • '}<a href={`http://localhost:5000/api/updates/${update.id}/email-preview`} target="_blank" rel="noreferrer">Preview email</a>
+                          {' • '}<a href={`${API}/updates/${update.id}/email-preview`} target="_blank" rel="noreferrer">Preview email</a>
                         </p>
                       </td>
                     </tr>
