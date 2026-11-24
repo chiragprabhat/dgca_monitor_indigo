@@ -65,7 +65,7 @@ export function requireDirectMonitoringConnection() {
 }
 
 // Keep the lock on one dedicated PostgreSQL session for the whole run.
-export async function acquireMonitoringLock() {
+export async function acquireMonitoringLock(key = 4) {
   requireDirectMonitoringConnection();
   const client = await getPool().connect();
   let connectionError;
@@ -76,7 +76,7 @@ export async function acquireMonitoringLock() {
     client.off('error', rememberError);
   }
   try {
-    const { rows: [row] } = await client.query('SELECT pg_try_advisory_lock(13691, 4) AS acquired');
+    const { rows: [row] } = await client.query('SELECT pg_try_advisory_lock(13691, $1) AS acquired', [key]);
     if (!row.acquired) {
       dispose();
       return null;
@@ -91,7 +91,7 @@ export async function acquireMonitoringLock() {
     },
     async release() {
       try {
-        if (!connectionError) await client.query('SELECT pg_advisory_unlock(13691, 4)');
+        if (!connectionError) await client.query('SELECT pg_advisory_unlock(13691, $1)', [key]);
       } catch (error) {
         connectionError = error;
       } finally {

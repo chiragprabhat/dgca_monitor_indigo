@@ -104,6 +104,10 @@ CREATE TABLE IF NOT EXISTS car_changes (
   detected_at TEXT DEFAULT dgca_utc_now()
 );
 
+ALTER TABLE car_changes
+  ADD COLUMN IF NOT EXISTS previous_history_id bigint REFERENCES car_history(id),
+  ADD COLUMN IF NOT EXISTS compare_pdf_url text;
+
 CREATE TABLE IF NOT EXISTS uploaded_documents (
   id TEXT PRIMARY KEY,
   filename TEXT NOT NULL,

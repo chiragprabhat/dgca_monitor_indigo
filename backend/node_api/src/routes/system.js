@@ -4,6 +4,7 @@ import { getDatabase } from '../config/database.js';
 import { getSchedulerStatus } from '../services/scheduler-service.js';
 import { getEmailConfiguration } from '../services/notification-service.js';
 import { getSummaryEngineStatus } from '../services/summary-service.js';
+import { sendPayload } from '../utils/send-payload.js';
 
 const router = express.Router();
 
@@ -37,7 +38,8 @@ router.get('/health', async (req, res, next) => {
       FROM updates
     `).get();
     const engines = await getSummaryEngineStatus();
-    const engineLabel = { claude: 'Claude AI', ollama: `local model (${engines.ollama.model})`, basic: 'built-in text summary' }[engines.active];
+    const engineLabel = { claude: 'Claude AI', ollama: `local model (${engines.ollama.model})`, basic: 'built-in text summary' }[engines.active]
+      || 'select the built-in summary engine in Settings';
     const documents = {
       ok: !docs.read || docs.withText > 0,
       detail: !docs.read
@@ -99,7 +101,7 @@ router.get('/export.csv', asyncRoute(async (req, res) => {
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="dgca-publications-${new Date().toISOString().slice(0, 10)}.csv"`);
-  res.send('﻿' + lines.join('\r\n'));
+  await sendPayload(res, '﻿' + lines.join('\r\n'), 'text/csv');
 }));
 
 export default router;

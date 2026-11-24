@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { checkForUpdates } from './monitor-service.js';
 import { getSettings } from './settings-service.js';
 import { createLogger } from '../utils/logger.js';
+import { getDatabase } from '../config/database.js';
 
 const logger = createLogger('scheduler');
 
@@ -78,7 +79,7 @@ export async function startScheduler() {
 
 // Called after the check interval is changed in Settings.
 export async function restartScheduler() {
-  if (process.env.MONITOR_SCHEDULER === 'github') return;
+  if (process.env.MONITOR_SCHEDULER === 'github' || process.env.VERCEL === '1') return;
   await schedule();
 }
 
@@ -93,9 +94,14 @@ export function stopScheduler() {
 export async function getSchedulerStatus() {
   const config = await settings();
   const { minutes, startHour, endHour } = config;
-  const external = process.env.MONITOR_SCHEDULER === 'github';
+  const hosted = process.env.VERCEL === '1';
+  const external = hosted || process.env.MONITOR_SCHEDULER === 'github';
+  const heartbeat = hosted && (await getDatabase().prepare(
+    "SELECT updated_at FROM config WHERE key = 'actions_worker_heartbeat'"
+  ).get())?.updated_at;
   return {
-    running: external || scheduledJob !== null,
+    running: hosted ? !!heartbeat && +new Date(`${heartbeat.replace(' ', 'T')}Z`) > Date.now() - 45 * 60 * 1000
+      : external || scheduledJob !== null,
     intervalMinutes: minutes,
     startHour,
     endHour,

@@ -11,11 +11,12 @@ export function createAccessPolicy(env = process.env) {
   const username = env.API_OPERATOR_USERNAME;
   const password = env.API_OPERATOR_PASSWORD;
   const enabled = production || !!(username || password);
-  const schedule = env.MONITOR_SCHEDULER || 'local';
+  const onVercel = env.VERCEL === '1';
+  const schedule = onVercel ? 'worker' : env.MONITOR_SCHEDULER || 'local';
   const triggerToken = env.MONITOR_TRIGGER_TOKEN;
   const origins = (env.FRONTEND_URL || '').split(',').map(value => value.trim()).filter(Boolean);
 
-  if (!['local', 'github'].includes(schedule)) throw new Error('MONITOR_SCHEDULER must be local or github');
+  if (!onVercel && !['local', 'github'].includes(schedule)) throw new Error('MONITOR_SCHEDULER must be local or github');
   if (enabled && (!username || username.includes(':') || !password || password.length < 20)) {
     throw new Error('API access requires API_OPERATOR_USERNAME and an API_OPERATOR_PASSWORD of at least 20 characters');
   }
@@ -36,7 +37,8 @@ export function createAccessPolicy(env = process.env) {
   const triggerDigest = triggerToken ? digest(triggerToken) : null;
 
   function requireHttps(req, res, next) {
-    if (production && !req.secure) return res.status(400).json({ error: 'HTTPS required' });
+    const https = onVercel ? req.get('x-forwarded-proto') === 'https' : req.secure;
+    if (production && !https) return res.status(400).json({ error: 'HTTPS required' });
     if (!production && (!LOCAL_HOSTS.has(req.hostname) || req.get('forwarded') || req.get('x-forwarded-proto'))) {
       return res.status(503).json({ error: 'Enable production mode before proxying the API' });
     }

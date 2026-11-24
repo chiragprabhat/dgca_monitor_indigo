@@ -30,12 +30,12 @@ import compareRoutes from './routes/compare.js';
 import archiveRoutes from './routes/archive.js';
 import searchRoutes from './routes/search.js';
 import carsRoutes from './routes/cars.js';
+import jobsRoutes from './routes/jobs.js';
+import { serverless } from './services/job-service.js';
 import { syncCars, CHECK_EVERY_MINUTES } from './services/car-service.js';
 import { startAnalysis } from './services/archive-service.js';
 import axios from 'axios';
 import { getHttpsAgent } from './utils/system-ca.js';
-
-if (process.env.VERCEL) throw new Error('The full DGCA Express API requires a long-running host');
 
 // DGCA page and PDF downloads trust the same certificates as Windows (see utils/system-ca.js).
 axios.defaults.httpsAgent = getHttpsAgent();
@@ -58,12 +58,12 @@ app.use(cors({
   origin: [...access.allowedOrigins],
   credentials: true
 }));
-app.post('/api/monitor/scheduled', access.requireScheduledTrigger, scheduledMonitor);
+if (!serverless()) app.post('/api/monitor/scheduled', access.requireScheduledTrigger, scheduledMonitor);
 app.use('/api', access.requireOperator);
 app.use(express.json());
 
 // Initialize Database
-try {
+if (!serverless()) try {
   if (access.production || process.env.MONITOR_SCHEDULER === 'github') requireDirectMonitoringConnection();
   await initializeDatabase();
   await backfillRevisionKeys();
@@ -85,6 +85,7 @@ app.use('/api/compare', compareRoutes);
 app.use('/api/archive', archiveRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/cars', carsRoutes);
+if (serverless()) app.use('/api/jobs', jobsRoutes);
 
 // Health Check
 app.get('/api/health', (req, res) => {
@@ -97,6 +98,7 @@ app.get('/api/health', (req, res) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
   const status = err.status || 500;
   logger.error('Express error', { status, type: err.name });
   res.status(status).json({
@@ -115,7 +117,7 @@ app.use((req, res) => {
 
 // Start Server
 const HOST = access.host;
-if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+if (!serverless() && process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   app.listen(PORT, HOST, async () => {
     logger.info(`Server running on http://localhost:${PORT} (listening on ${HOST})`);
     logger.info(process.env.MONITOR_SCHEDULER === 'github' ? 'Waiting for GitHub monitoring triggers' : 'Starting DGCA monitoring scheduler');

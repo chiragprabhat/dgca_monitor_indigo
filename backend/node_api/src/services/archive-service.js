@@ -5,6 +5,7 @@ import { analyzePublication } from './summary-service.js';
 import { todayIST } from './priority-service.js';
 import { getDatabase } from '../config/database.js';
 import { createLogger } from '../utils/logger.js';
+import { jobStatus, serverless } from './job-service.js';
 
 const logger = createLogger('archive');
 
@@ -43,17 +44,18 @@ const state = {
 // Pulls every publication from each tab's "More" page (current list and the
 // Archived block). Anything not already stored is saved with an email status set,
 // so the monitor never emails it. Items dated today are left to the monitor.
-export async function importArchive() {
+export async function importArchive({ awaitImport = false, progress, checkpoint } = {}) {
   if (state.importing) return { started: false, reason: 'An import is already running' };
   state.importing = true;
-  const run = { startedAt: new Date().toISOString(), finishedAt: null, perSection: {}, added: 0, alreadyKnown: 0, error: null };
+  const run = progress || { startedAt: new Date().toISOString(), finishedAt: null, perSection: {}, added: 0, alreadyKnown: 0, error: null };
   state.lastImport = run;
 
-  (async () => {
+  const imported = (async () => {
     try {
-      const today = todayIST();
-      const failed = [];
+      const today = todayIST(run.startedAt);
+      const failed = Object.keys(run.perSection).filter(section => run.perSection[section].error);
       for (const section of SECTION_KEYS) {
+        if (Object.hasOwn(run.perSection, section)) continue;
         let items = null;
         // DGCA sometimes answers with an empty page under load; give each tab a few tries.
         for (let attempt = 1; attempt <= 3 && !items; attempt++) {
@@ -67,6 +69,7 @@ export async function importArchive() {
         if (!items) {
           failed.push(section);
           run.perSection[section] = { listed: 0, added: 0, error: 'DGCA did not return the list - try the import again later' };
+          if (checkpoint) await checkpoint(run);
           continue;
         }
         let added = 0;
@@ -78,6 +81,7 @@ export async function importArchive() {
         }
         run.perSection[section] = { listed: items.length, added };
         run.added += added;
+        if (checkpoint) await checkpoint(run);
         logger.info(`${section}: ${items.length} listed on DGCA, ${added} added`);
         await sleep(3000);
       }
@@ -89,25 +93,28 @@ export async function importArchive() {
     } finally {
       run.finishedAt = new Date().toISOString();
       state.importing = false;
-      startAnalysis();
+      if (!awaitImport) startAnalysis();
     }
   })();
 
+  if (awaitImport) await imported;
   return { started: true };
 }
 
 // Reads the PDF and writes the built-in summary/priority for each imported item, one at a time.
-export function startAnalysis() {
+export function startAnalysis({ maxItems = Infinity } = {}) {
   if (state.analysing) return;
   state.analysing = true;
   state.analysisError = null;
 
-  (async () => {
+  return (async () => {
     try {
-      for (;;) {
-        const batch = await getUnanalyzedUpdates(20, 'archive');
+      let remaining = maxItems;
+      while (remaining > 0) {
+        const batch = await getUnanalyzedUpdates(Math.min(20, remaining), 'archive');
         if (batch.length === 0) break;
         for (const row of batch) {
+          remaining--;
           try {
             await analyseOne(row);
           } catch (error) {
@@ -119,7 +126,7 @@ export function startAnalysis() {
           await sleep(PAUSE_BETWEEN_PDFS_MS);
         }
       }
-      logger.info('Archive analysis complete');
+      if (remaining > 0) logger.info('Archive analysis complete');
     } catch (error) {
       state.analysisError = error.message;
       logger.error('Archive analysis stopped', { error: error.message });
@@ -138,14 +145,16 @@ export async function getArchiveStatus() {
     FROM updates WHERE origin = 'archive'
   `).get();
   const bySection = await db.prepare("SELECT section, COUNT(*) AS n FROM updates WHERE origin = 'archive' GROUP BY section").all();
+  const imported = serverless() ? await jobStatus('archive') : null;
+  const analysis = serverless() ? await jobStatus('archive-analysis') : null;
   return {
-    importing: state.importing,
-    analysing: state.analysing,
+    importing: imported?.active ?? state.importing,
+    analysing: analysis?.active || state.analysing || (serverless() && counts.total > (counts.analysed || 0)),
     total: counts.total || 0,
     analysed: counts.analysed || 0,
     withText: counts.withText || 0,
     bySection: Object.fromEntries(bySection.map(r => [r.section, r.n])),
-    lastImport: state.lastImport,
-    analysisError: state.analysisError
+    lastImport: imported?.progress ?? imported?.latest?.lastImport ?? state.lastImport,
+    analysisError: analysis?.latest?.analysisError ?? state.analysisError
   };
 }

@@ -4,6 +4,8 @@ import { toApiUpdate, analysisFromRow } from '../services/state-service.js';
 import { renderEmail } from '../services/notification-service.js';
 import { getDatabase, transaction } from '../config/database.js';
 import { compareWithPrevious, findPreviousVersion } from '../services/revision-service.js';
+import { queueRoute } from '../services/job-service.js';
+import { sendPayload } from '../utils/send-payload.js';
 import { listCars, relatedPublications } from '../services/car-service.js';
 
 export const REVIEW_STATUSES = ['new', 'under_review', 'actioned', 'not_applicable'];
@@ -56,7 +58,7 @@ router.get('/', asyncRoute(async (req, res) => {
     for (const p of relatedPublications(car, rows)) if (!carOf.has(p.id)) carOf.set(p.id, { id: car.id, subject: car.subject, series: car.series, part: car.part });
   }
 
-  res.json({
+  await sendPayload(res, {
     data: rows.map(r => ({ ...toApiUpdate(r), earlier_versions: r.revision_key ? previousCount(r) : 0, car_in_force: carOf.get(r.id) || null })),
     total,
     limit,
@@ -75,20 +77,22 @@ router.get('/:id/email-preview', asyncRoute(async (req, res) => {
 }));
 
 // What changed since the previous version of the same document; worked out on first request and stored.
-router.get('/:id/revision', async (req, res, next) => {
-  try {
-    const row = await getDatabase().prepare('SELECT * FROM updates WHERE id = $1').get(req.params.id);
-    if (!row) return res.status(404).json({ error: 'Update not found' });
-    if (!row.revision_key) return res.json({ revision: null, reason: 'No CAR or circular number recognised in the title' });
-    let revision = row.revision ? JSON.parse(row.revision) : null;
-    const previous = await findPreviousVersion(row);
-    if (!previous) return res.json({ revision: null, reason: 'No earlier version of this document is stored' });
-    if (!revision || revision.previous?.id !== previous.id || req.query.refresh) revision = await compareWithPrevious(row);
-    res.json({ revision });
-  } catch (error) {
-    next(error);
-  }
-});
+export async function getRevision(id, refresh) {
+  const row = await getDatabase().prepare('SELECT * FROM updates WHERE id = $1').get(id);
+  if (!row) return { status: 404, result: { error: 'Update not found' } };
+  if (!row.revision_key) return { status: 200, result: { revision: null, reason: 'No CAR or circular number recognised in the title' } };
+  let revision = row.revision ? JSON.parse(row.revision) : null;
+  const previous = await findPreviousVersion(row);
+  if (!previous) return { status: 200, result: { revision: null, reason: 'No earlier version of this document is stored' } };
+  if (!revision || revision.previous?.id !== previous.id || refresh) revision = await compareWithPrevious(row);
+  return { status: 200, result: { revision } };
+}
+
+router.get('/:id/revision', queueRoute('revision', req => ({ id: req.params.id, refresh: !!req.query.refresh })),
+  asyncRoute(async (req, res) => {
+    const { status, result } = await getRevision(req.params.id, req.query.refresh);
+    res.status(status).json(result);
+  }));
 
 // Review tracking: status, owner and note. Every change is kept in review_log.
 router.patch('/:id/review', asyncRoute(async (req, res) => {

@@ -215,6 +215,7 @@ function Settings({ onStatusUpdate }) {
     basic: true
   }
   const activeEngineLabel = { claude: 'Claude AI', ollama: `local model ${engines.ollama.model}`, basic: 'built-in text summary' }[engines.active]
+    || 'Select the built-in summary engine for this deployment'
   const lastFailedIsLatest = email.lastFailed && (!email.lastSent || email.lastFailed.sent_at > email.lastSent.sent_at)
 
   return (
@@ -349,7 +350,7 @@ function Settings({ onStatusUpdate }) {
               ))}
             </select>
           </div>
-          <StatusLine ok={engines.active !== 'basic'} warn={engines.active === 'basic'}>
+          <StatusLine ok={engines.active === 'claude' || engines.active === 'ollama'} warn={!engines.active || engines.active === 'basic'}>
             <strong>In use now:</strong> {activeEngineLabel}
             <br />
             Claude AI: {engines.claude.keySet ? `API key set (${engines.claude.model})` : 'no ANTHROPIC_API_KEY in .env'}

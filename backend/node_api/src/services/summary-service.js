@@ -38,6 +38,9 @@ let anthropicClient = null;
 
 export async function getSummaryProvider() {
   const configured = (await getSettings()).summaryProvider;
+  if (process.env.DGCA_ACTIONS_WORKER === '1' && configured !== 'basic') {
+    throw Object.assign(new Error('Select the built-in summary engine in Settings before running monitoring on GitHub Actions'), { status: 409 });
+  }
   if (configured !== 'auto') return configured;
   return process.env.ANTHROPIC_API_KEY ? 'claude' : 'ollama-or-basic';
 }
@@ -47,6 +50,10 @@ export async function getSummaryEngineStatus() {
   const base = (process.env.OLLAMA_BASE_URL || 'http://localhost:11434').replace(/\/$/, '');
   const model = process.env.OLLAMA_MODEL || 'llama3.1:8b';
   let ollama = { reachable: false, model, hasModel: false };
+  if (process.env.VERCEL === '1') {
+    const setting = (await getSettings()).summaryProvider;
+    return { setting, active: setting === 'basic' ? 'basic' : null, claude: { keySet: false, model: CLAUDE_MODEL }, ollama };
+  }
   try {
     const { data } = await axios.get(`${base}/api/tags`, { timeout: 1500 });
     const names = (data.models || []).map(m => m.name);

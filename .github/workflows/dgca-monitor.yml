@@ -5,34 +5,54 @@ on:
     - cron: '0,15,30,45 * * * *'
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: dgca-production-monitor
   cancel-in-progress: false
 
 jobs:
-  trigger:
+  monitor-and-process:
     if: vars.DGCA_MONITOR_ENABLED == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ${{ vars.DGCA_MONITOR_RUNNER || 'ubuntu-24.04' }}
-    timeout-minutes: 2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    defaults:
+      run:
+        working-directory: backend/node_api
     steps:
-      - name: Request scheduled check
-        shell: bash
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/node_api/package-lock.json
+      - run: npm ci --omit=dev --no-audit --no-fund
+      - name: Monitor DGCA and process Neon jobs
         env:
-          API_ORIGIN: ${{ vars.DGCA_MONITOR_API_ORIGIN }}
-          TRIGGER_TOKEN: ${{ secrets.MONITOR_TRIGGER_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$API_ORIGIN" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?/?$ || -z "$TRIGGER_TOKEN" ]]; then
-            echo 'Configure DGCA_MONITOR_API_ORIGIN and the MONITOR_TRIGGER_TOKEN secret.'
-            exit 1
-          fi
-          status="$(curl --silent --show-error --proto '=https' --max-time 30 --request POST \
-            --header "Authorization: Bearer $TRIGGER_TOKEN" --output /dev/null --write-out '%{http_code}' \
-            "${API_ORIGIN%/}/api/monitor/scheduled")"
-          if [[ "$status" != 202 ]]; then
-            echo "Monitoring request failed with HTTP $status."
-            exit 1
-          fi
-          echo 'Monitoring trigger acknowledged. Check the app monitoring log for cycle results.'
+          DGCA_ACTIONS_WORKER: '1'
+          DGCA_MONITOR_ENABLED: ${{ vars.DGCA_MONITOR_ENABLED }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MONITOR_START_HOUR: ${{ vars.MONITOR_START_HOUR }}
+          MONITOR_END_HOUR: ${{ vars.MONITOR_END_HOUR }}
+          MONITOR_INTERVAL_MINUTES: ${{ vars.MONITOR_INTERVAL_MINUTES }}
+          MONITOR_INTERVAL_HOURS: ${{ vars.MONITOR_INTERVAL_HOURS }}
+          SUMMARY_PROVIDER: ${{ vars.SUMMARY_PROVIDER }}
+          EMAIL_NOTIFICATIONS_ENABLED: ${{ vars.EMAIL_NOTIFICATIONS_ENABLED }}
+          EMAIL_SAME_DAY_ONLY: ${{ vars.EMAIL_SAME_DAY_ONLY }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+          EMAIL_FROM_NAME: ${{ vars.EMAIL_FROM_NAME }}
+          EMAIL_RECIPIENTS: ${{ vars.EMAIL_RECIPIENTS }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_MAX_ATTACHMENT_MB: ${{ vars.EMAIL_MAX_ATTACHMENT_MB }}
+          SMTP_HOST: ${{ vars.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_SECURE: ${{ vars.SMTP_SECURE }}
+          SMTP_USER: ${{ vars.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SCRAPER_TIMEOUT_MS: ${{ vars.SCRAPER_TIMEOUT_MS }}
+          SCRAPER_RETRY_ATTEMPTS: ${{ vars.SCRAPER_RETRY_ATTEMPTS }}
+          LOG_LEVEL: warn
+        run: npm run worker:actions

@@ -4,6 +4,8 @@ import { getDatabase } from '../config/database.js';
 import { fetchPdfWithText, FULL_DOCUMENT_PAGES } from '../services/pdf-service.js';
 import { diffTexts, fullTextOf } from '../services/revision-service.js';
 import { MAX_UPLOAD_BYTES, storeUpload, listUploads, deleteUpload, loadUpload } from '../services/upload-service.js';
+import { queueRoute, serverless } from '../services/job-service.js';
+import { CHUNK_BYTES, openUpload, putChunk, queueUpload } from '../services/chunk-upload-service.js';
 
 const router = express.Router();
 
@@ -62,30 +64,58 @@ async function loadByUrl(raw) {
 }
 
 // GET /api/compare?a=<id>&b=<id>   or   ?a=<id>&url=<DGCA PDF link>
-router.get('/', async (req, res, next) => {
+function comparisonInput({ a, b, url }) {
+  const error = !a || (!b && !url) || [a, b, url].some(value => value !== undefined && typeof value !== 'string')
+    ? 'Choose two documents to compare'
+    : b && a === b ? 'Choose two different documents' : null;
+  if (error) throw Object.assign(new Error(error), { status: 400 });
+  return { a, b, url };
+}
+
+export async function compareDocuments(query) {
+  const { a, b, url } = comparisonInput(query);
+  const [left, right] = await Promise.all([loadById(a), b ? loadById(b) : loadByUrl(url)]);
+  const { leftLines, rightLines, chunks, stats } = diffTexts(left.text, right.text);
+  const warnings = [];
+  if (leftLines.length < 3) warnings.push(`"${left.label.slice(0, 60)}" has little or no readable text (probably scanned).`);
+  if (rightLines.length < 3) warnings.push(`"${right.label.slice(0, 60)}" has little or no readable text (probably scanned).`);
+
+  return {
+    left: { label: left.label, published: left.published, section: left.section, pages: left.pages, lines: leftLines.length },
+    right: { label: right.label, published: right.published, section: right.section, pages: right.pages, lines: rightLines.length },
+    stats,
+    warnings,
+    chunks
+  };
+}
+
+router.get('/', queueRoute('compare', req => comparisonInput(req.query)), asyncRoute(async (req, res) => {
   try {
-    const { a, b, url } = req.query;
-    if (!a || (!b && !url)) return res.status(400).json({ error: 'Choose two documents to compare' });
-    if (b && a === b) return res.status(400).json({ error: 'Choose two different documents' });
-
-    const [left, right] = await Promise.all([loadById(a), b ? loadById(b) : loadByUrl(url)]);
-    const { leftLines, rightLines, chunks, stats } = diffTexts(left.text, right.text);
-    const warnings = [];
-    if (leftLines.length < 3) warnings.push(`"${left.label.slice(0, 60)}" has little or no readable text (probably scanned).`);
-    if (rightLines.length < 3) warnings.push(`"${right.label.slice(0, 60)}" has little or no readable text (probably scanned).`);
-
-    res.json({
-      left: { label: left.label, published: left.published, section: left.section, pages: left.pages, lines: leftLines.length },
-      right: { label: right.label, published: right.published, section: right.section, pages: right.pages, lines: rightLines.length },
-      stats,
-      warnings,
-      chunks
-    });
+    res.json(await compareDocuments(req.query));
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
-    next(error);
+    throw error;
   }
+}));
+
+router.use('/upload-sessions', (_req, res, next) => {
+  if (!serverless()) return res.sendStatus(404);
+  next();
 });
+
+router.post('/upload-sessions', asyncRoute(async (req, res) => {
+  res.status(201).json(await openUpload(req.body?.name, req.body?.bytes));
+}));
+
+router.put('/upload-sessions/:id/:part', express.raw({ type: 'application/octet-stream', limit: CHUNK_BYTES, inflate: false }),
+  asyncRoute(async (req, res) => {
+    await putChunk(req.params.id, Number(req.params.part), req.body);
+    res.sendStatus(204);
+  }));
+
+router.post('/upload-sessions/:id/finish', asyncRoute(async (req, res) => {
+  res.status(202).json({ jobId: await queueUpload(req.params.id) });
+}));
 
 // POST /api/compare/upload?name=<file name>   body: the raw PDF bytes
 // Stores the PDF's text so it can be compared (as "upload:<id>") with a CAR in force or any publication.

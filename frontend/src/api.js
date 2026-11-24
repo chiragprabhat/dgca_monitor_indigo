@@ -1,5 +1,27 @@
 export const API = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/+$/, '') || '/api'
 
+async function jobResult(id, signal) {
+  const deadline = Date.now() + 45 * 60 * 1000
+  let result = ''
+  let offset = 0
+  while (Date.now() < deadline) {
+    const job = await api(`/jobs/${encodeURIComponent(id)}?offset=${offset}`, { signal })
+    if (job.state === 'queued' || job.state === 'running') {
+      await new Promise(resolve => setTimeout(resolve, 15000))
+      continue
+    }
+    result += job.chunk || ''
+    if (job.next !== null) {
+      offset = job.next
+      continue
+    }
+    const data = JSON.parse(result)
+    if (job.status >= 400) throw new Error(data.error || `Request failed (${job.status})`)
+    return data
+  }
+  throw new Error('This job is still pending. Check the dashboard before retrying.')
+}
+
 export async function api(path, options = {}) {
   const res = await fetch(`${API}${path}`, {
     credentials: 'include',
@@ -8,11 +30,30 @@ export async function api(path, options = {}) {
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`)
+  if (res.status === 202 && data.jobId) return jobResult(data.jobId, options.signal)
   return data
 }
 
 // Sends a PDF the user picked (as raw bytes) to be stored for Document Comparison.
 export async function uploadPdf(file) {
+  if (__DGCA_SERVERLESS__) {
+    const { id, chunkBytes } = await api('/compare/upload-sessions', {
+      method: 'POST', body: JSON.stringify({ name: file.name, bytes: file.size })
+    })
+    for (let offset = 0, part = 0; offset < file.size; offset += chunkBytes, part++) {
+      const response = await fetch(`${API}/compare/upload-sessions/${id}/${part}`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file.slice(offset, offset + chunkBytes)
+      })
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.error || `Upload failed (${response.status})`)
+      }
+    }
+    return api(`/compare/upload-sessions/${id}/finish`, { method: 'POST' })
+  }
   const res = await fetch(`${API}/compare/upload?name=${encodeURIComponent(file.name)}`, {
     method: 'POST',
     credentials: 'include',

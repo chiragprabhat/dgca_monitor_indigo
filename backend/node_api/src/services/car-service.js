@@ -100,7 +100,6 @@ export async function syncCars({ section = 8 } = {}) {
     const rows = await fetchSectionList(section);
     summary.listed = rows.length;
     // CAR metadata, revision history, and change logs are committed together.
-    const amendedChange = new Map();
     await transaction(async db => {
       await db.query('SELECT pg_advisory_xact_lock(13694, $1::integer)', [section]);
       const stored = await db.prepare('SELECT * FROM car_documents WHERE section = $1').all(section);
@@ -111,7 +110,7 @@ export async function syncCars({ section = 8 } = {}) {
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, dgca_utc_now())`);
       const update = db.prepare(`UPDATE car_documents SET series_title=$1, issue=$2, issue_date=$3, subject=$4, amendment=$5,
         amendment_date=$6, status=$7, attach_id=$8, pdf_url=$9, listed_at=dgca_utc_now() WHERE id=$10`);
-      const keep = db.prepare('INSERT INTO car_history (car_id, amendment, amendment_date, pdf_url, pdf_text, pdf_pages) VALUES ($1, $2, $3, $4, $5, $6)');
+      const keep = db.prepare('INSERT INTO car_history (car_id, amendment, amendment_date, pdf_url, pdf_text, pdf_pages) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id');
       const resetText = db.prepare('UPDATE car_documents SET pdf_text = NULL, pdf_pages = NULL, read_at = NULL WHERE id = $1');
       const log = db.prepare('INSERT INTO car_changes (car_id, change, detail) VALUES ($1, $2, $3) RETURNING id');
       const note = async (id, change, detail) => { if (!firstLoad) { summary.changed++; return (await log.get(id, change, detail)).id; } };
@@ -124,9 +123,11 @@ export async function syncCars({ section = 8 } = {}) {
           continue;
         }
         const newPdf = old.attach_id !== row.attach_id;
+        let history;
         if (newPdf) {
-          if (old.pdf_text) await keep.run(old.id, old.amendment, old.amendment_date, old.pdf_url, old.pdf_text, old.pdf_pages);
+          if (old.pdf_text) history = await keep.get(old.id, old.amendment, old.amendment_date, old.pdf_url, old.pdf_text, old.pdf_pages);
           await resetText.run(old.id);
+          await db.query('UPDATE car_changes SET previous_history_id = NULL, compare_pdf_url = NULL WHERE car_id = $1 AND previous_history_id IS NOT NULL', [row.id]);
         }
         if (row.status === 'revoked' && old.status !== 'revoked') {
           summary.revoked++;
@@ -136,7 +137,8 @@ export async function syncCars({ section = 8 } = {}) {
         } else if (row.status === 'in force' && newPdf) {
           summary.updated++;
           const id = await note(row.id, 'amended', `${label(row)} amended: ${row.subject} - ${inForceText(old)} → ${inForceText(row)}`);
-          if (id && old.pdf_text) amendedChange.set(row.id, { id, oldText: old.pdf_text });
+          if (id && history && row.pdf_url) await db.query(
+            'UPDATE car_changes SET previous_history_id = $1, compare_pdf_url = $2 WHERE id = $3', [history.id, row.pdf_url, id]);
         } else if (row.status === 'in force'
           && ['subject', 'issue', 'amendment', 'amendment_date'].some(k => (old[k] || '') !== (row[k] || ''))) {
           await note(row.id, 'details', `${label(row)} details changed on DGCA: ${old.subject} (${inForceText(old)}) → ${row.subject} (${inForceText(row)})`);
@@ -163,18 +165,28 @@ export async function syncCars({ section = 8 } = {}) {
     // Read every CAR PDF that has no text yet, gently.
     const unread = await db.prepare("SELECT id, pdf_url FROM car_documents WHERE section = $1 AND status = 'in force' AND pdf_url IS NOT NULL AND pdf_text IS NULL").all(section);
     const save = db.prepare('UPDATE car_documents SET pdf_text = $1, pdf_pages = $2, read_at = dgca_utc_now() WHERE id = $3');
-    const completeAmended = db.prepare('UPDATE car_changes SET detail = detail || $1 WHERE id = $2');
     for (const car of unread) {
       const pdf = await fetchPdfWithText(car.pdf_url, { maxPages: FULL_DOCUMENT_PAGES });
       if (pdf) {
         await save.run(pdf.text || '', pdf.pageCount ?? null, car.id); summary.read++;
-        const amended = amendedChange.get(car.id);
-        if (amended && pdf.text) {
-          const { stats } = diffTexts(amended.oldText, pdf.text);
-          await completeAmended.run(` (${stats.added} sentences added, ${stats.removed} removed, ${stats.similarity}% unchanged)`, amended.id);
-        }
       } else summary.failed++;
       await new Promise(r => setTimeout(r, PAUSE_BETWEEN_PDFS_MS));
+    }
+    const amended = await db.prepare(`
+      SELECT ch.id, h.pdf_text AS before, c.pdf_text AS after
+      FROM car_changes ch JOIN car_history h ON h.id = ch.previous_history_id
+      JOIN car_documents c ON c.id = ch.car_id AND c.pdf_url = ch.compare_pdf_url
+      WHERE c.section = $1 AND c.pdf_text IS NOT NULL
+    `).all(section);
+    const complete = db.prepare(`UPDATE car_changes SET detail = detail || $1,
+      previous_history_id = NULL, compare_pdf_url = NULL WHERE id = $2 AND previous_history_id IS NOT NULL`);
+    for (const change of amended) {
+      if (!change.after) {
+        await complete.run('', change.id);
+        continue;
+      }
+      const { stats } = diffTexts(change.before, change.after);
+      await complete.run(` (${stats.added} sentences added, ${stats.removed} removed, ${stats.similarity}% unchanged)`, change.id);
     }
     lastSync = { startedAt, finishedAt: new Date().toISOString(), ...summary, error: null };
     logger.info(`CAR Section ${section}: ${summary.listed} listed, ${summary.added} new, ${summary.updated} amended, ${summary.revoked} revoked, ${summary.removed} removed, ${summary.read} PDFs read, ${summary.failed} failed`);
@@ -198,7 +210,7 @@ export async function carSyncStatus() {
 export const CHECK_EVERY_MINUTES = 60;
 
 export async function recentCarChanges(limit = 50) {
-  return await getDatabase().prepare('SELECT * FROM car_changes ORDER BY detected_at DESC NULLS LAST, id DESC LIMIT NULLIF(GREATEST($1::bigint, -1), -1)').all(limit);
+  return await getDatabase().prepare('SELECT id, car_id, change, detail, detected_at FROM car_changes ORDER BY detected_at DESC NULLS LAST, id DESC LIMIT NULLIF(GREATEST($1::bigint, -1), -1)').all(limit);
 }
 
 // Words that say nothing about which CAR a title is about.

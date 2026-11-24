@@ -35,12 +35,14 @@ async function readSettings(db) {
       if (key in settings) settings[key] = JSON.parse(value);
     }
   } catch (error) {
+    if (process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1') throw error;
     logger.error('Could not read saved settings; using .env values', { error: error.message });
   }
   return settings;
 }
 
 export async function getSettings() {
+  if (process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1') return readSettings(getDatabase());
   cache ??= readSettings(getDatabase());
   return cache;
 }
@@ -67,6 +69,7 @@ function validate(key, value) {
     case 'intervalMinutes':
       return INTERVALS.includes(value) ? null : `must be one of ${INTERVALS.join(', ')}`;
     case 'summaryProvider':
+      if (process.env.VERCEL === '1' && value !== 'basic') return 'must be basic in this deployment';
       return PROVIDERS.includes(value) ? null : `must be one of ${PROVIDERS.join(', ')}`;
     default:
       return 'is not a setting that can be changed here';

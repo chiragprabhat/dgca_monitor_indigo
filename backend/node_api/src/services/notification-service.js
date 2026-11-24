@@ -297,7 +297,7 @@ async function logNotification(updateId, recipient, status, error = null) {
 }
 
 export async function getEmailConfiguration() {
-  const hasPassword = !!(process.env.SMTP_HOST
+  const hasPassword = process.env.VERCEL === '1' ? process.env.DGCA_WORKER_SMTP_CONFIGURED === 'true' : !!(process.env.SMTP_HOST
     ? (process.env.SMTP_PASSWORD || process.env.EMAIL_APP_PASSWORD)
     : process.env.EMAIL_APP_PASSWORD && !/your_|here/.test(process.env.EMAIL_APP_PASSWORD));
   const last = async status => await getDatabase().prepare(

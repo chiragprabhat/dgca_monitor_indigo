@@ -1,75 +1,65 @@
-# DGCA Monitor production deployment
+# DGCA deployment on Vercel, GitHub Actions, and Neon
 
-## Supported layout and limits
+**Deployment is pending approval.** Keep `DGCA_MONITOR_ENABLED` unset or `false` while reviewing and testing. Live delivery uses the project's existing SMTP endpoint. The worker also contacts the DGCA source. All hosting and persistence in this design use the three specified platforms.
 
-Deploy the React/Vite build to Vercel and connect it directly over HTTPS to a single long-running Express host. Express owns the existing Neon tables, CAR refresh, archive analysis, PDF processing, monitoring, and SMTP delivery. GitHub Actions supplies the scheduled triggers. No new hosted storage, AI provider, or paid service is configured.
+## Architecture and compatibility
 
-- **Express on Vercel** cannot preserve the full API. Document Comparison accepts 40 MiB uploads. Vercel Functions cap requests at 4.5 MB by default, with a 20 MiB beta that still falls short. Archive and CAR jobs run after HTTP responses and depend on a continuously running process. Large comparisons and monitoring can exceed request timeouts. The backend refuses to start under Vercel rather than silently disabling these features. [Vercel Express](https://vercel.com/docs/frameworks/backend/express) · [Request limits](https://vercel.com/docs/errors/function_payload_too_large) · [Runtime limits](https://vercel.com/docs/functions/runtimes)
-- **Storage** stays in existing systems. Express downloads and parses PDFs in memory and stores extracted text, metadata, history, and settings in Neon. Uploaded PDF bytes live only for the duration of processing. Give the Express log directory persistent disk space or collect stdout. The separate Python/Streamlit workflow reads and writes PDFs, extracted text, and email preview files under `backend/data/`. Keep it on a persistent volume or existing host if you use it. Streamlit requires a separate access gate before remote exposure.
-- **Schedule capacity** must be confirmed before enabling. GitHub can delay or drop scheduled jobs, and schedules run from the default branch. Four triggers per hour means about 2,880 jobs in 30 days. Check the included Actions allowance for your repository type or use an existing approved self-hosted runner. Vercel Hobby is for personal, non-commercial use. Confirm your existing Vercel plan permits the intended use before deploying. [GitHub scheduled workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule) · [Actions billing](https://docs.github.com/en/actions/concepts/billing-and-usage) · [Vercel Hobby](https://vercel.com/docs/plans/hobby)
-
-## 1. Configure the Express host
-
-Use Node.js 24 and a host that can reach Neon, DGCA, and your configured SMTP and AI providers. Start one persistent Express process from `backend/node_api` with `npm ci` and `npm start`. Bind to loopback behind a TLS reverse proxy on the same host. The proxy must overwrite `X-Forwarded-Proto` with the connection scheme and keep the Node port inaccessible from the public network. Set proxy limits to allow 40 MiB PDF uploads, large comparison responses, and the full duration of a manual comparison or monitor request. Proxy or firewall rate limiting for repeated authentication failures is part of the production host setup.
-
-| Variable | Use |
+| Feature | Deployment path and limits |
 | --- | --- |
-| `NODE_ENV` | Set to `production` to enforce HTTPS and operator authentication. |
-| `HOST`, `PORT` | Use `127.0.0.1` and an internal proxy port, default `5000`. |
-| `DATABASE_URL` | Existing **direct**, TLS-verified Neon URL. PostgreSQL session locks must stay on the same backend session. A Neon `-pooler` host is refused for monitoring. Use the same database branch the UI already uses. [Neon connection pooling](https://neon.com/docs/connect/connection-pooling) |
-| `FRONTEND_URL` | Comma-separated allowed HTTPS origins, for example `https://monitor.example.org`. Supply exact origins without paths or trailing slashes. |
-| `API_OPERATOR_USERNAME`, `API_OPERATOR_PASSWORD` | Operator credential for the dashboard API. Use a unique random password of at least 20 characters. |
-| `MONITOR_SCHEDULER` | Set to `github` when Actions takes over. Default `local` retains the existing Express cron and startup check. |
-| `MONITOR_TRIGGER_TOKEN` | Required in GitHub mode. Generate a separate random token of at least 32 characters and store the same value as a GitHub Actions secret. |
-| `MONITOR_INTERVAL_MINUTES`, `MONITOR_INTERVAL_HOURS` | Existing defaults and fallback. Saved dashboard settings take precedence. The 15, 30, 60, and 240 minute dashboard options work in GitHub mode. Custom sub-hour settings must be multiples of 15 minutes in GitHub mode. |
-| `MONITOR_START_HOUR`, `MONITOR_END_HOUR` | Existing inclusive IST monitoring window. Defaults are 0 through 23. |
-| `SCRAPER_TIMEOUT_MS`, `SCRAPER_RETRY_ATTEMPTS` | Existing optional overrides for DGCA HTTP requests. |
-| `LOG_DIR`, `LOG_LEVEL`, `USE_WINDOWS_CERTS` | Existing logging and Windows TLS configuration. Use a persistent writable log location if retaining file logs. |
+| React and Express | One root Vercel Vite project serves the dashboard and routes same-origin `/api/*` to Express. The function uses operator HTTP Basic authentication over HTTPS and checks browser origins. It runs without database initialization, background timers, or a listening Express server. |
+| Dashboard, search, history, review, settings, export | Existing REST routes read or write Neon directly. Large update lists, CAR lists, and CSV exports use HTTP streaming on Vercel. |
+| Monitoring and email | The main-branch Actions workflow runs the existing Node scraper, change detection, PDF processing, summary, notification, and backfill logic directly. Four invocations per hour check the saved interval and inclusive IST window. A direct Neon connection holds the worker and monitoring advisory locks. The scheduled slot and automatic SMTP attempt are claimed durably. An interrupted delivery can require an operator to check the SMTP history. Exact-once delivery cannot be guaranteed across PostgreSQL and SMTP. |
+| CAR library and archives | Manual refresh and import still acknowledge queued work. Actions refreshes CARs hourly, uses existing history and deduplication, and processes archive PDFs in batches. Interrupted idempotent work is recovered on the next worker run. A long or failed import can take multiple runs. |
+| PDF uploads and comparison | The existing browser flow transfers up to 40 MiB in 3 MiB chunks and waits for the normal document metadata. Neon validates chunk sizes and positions and caps active reservations at 120 MiB. Unfinished sessions expire after one hour. The worker removes completed upload bytes and retains the existing extracted text, metadata, and hash. The legacy one-request upload endpoint remains subject to Vercel's request limit. |
+| Long-running REST calls | Manual monitoring, SMTP verification/test sends, comparisons, and revision requests return HTTP `202` with `jobId` on Vercel. The React client polls the authenticated job route and reconstructs the original result fields. Existing external API callers must follow this asynchronous protocol. Jobs can wait until the next runner starts and complete later during backlogs. |
+| Summaries | The existing built-in text analysis runs without a remote AI key or Ollama. A saved `auto`, `ollama`, or `claude` selection blocks scheduled analysis until the operator explicitly chooses `basic`. The existing generative integrations remain usable outside this deployment. |
+| Python and Streamlit | The separate Python pipeline and Streamlit dashboard remain in the repository with their existing data paths and tests. Streamlit needs persistent WebSocket sessions and its current Python document previews rely on files across runs. A faithful hosted version is outside this architecture. Running the Python monitor beside the Node monitor would also create overlapping independent notification pipelines. [Streamlit architecture](https://docs.streamlit.io/develop/concepts/architecture/architecture) · [Vercel WebSocket limitations](https://vercel.com/guides/do-vercel-serverless-functions-support-websocket-connections) |
 
-Keep existing SMTP values on the Express host:
+Job status and upload chunks live in three additive PostgreSQL tables. The worker expires ordinary requests still queued after one day. Completed results are retained for one day, with the latest archive import and CAR sync statuses retained for the dashboard. When scheduling is disabled, the worker cannot process queued jobs or perform scheduled cleanup. Opening a new upload also removes expired unfinished sessions.
 
-| Variables | Use |
+Vercel's standard body limit is 4.5 MB and functions have a finite lifetime. The app uses chunked requests and streamed responses to avoid routing large PDFs through one request or returning large exports in one buffered response. [Vite on Vercel](https://vercel.com/docs/frameworks/frontend/vite) · [Function limits](https://vercel.com/docs/functions/limitations) · [Streaming large responses](https://vercel.com/kb/guide/how-to-bypass-vercel-body-size-limit-serverless-functions)
+
+## Free-tier feasibility
+
+- **Vercel Hobby** is for personal, noncommercial use. Confirm eligibility before any deployment. If the monitor is for airline operations, confirm the intended use with Vercel and use only an already-authorized eligible plan. Hobby includes 1 million function invocations, 4 active CPU-hours, and 360 GB-hours of provisioned memory. At 10,000 baseline requests plus 40 queued browser requests waiting an average of 7.5 minutes, the 15-second poll adds about 1,200 requests. Forty 40 MiB PDFs add about 640 upload requests. Actual dashboard refreshes, memory residency, and PDF traffic vary. [Vercel Hobby](https://vercel.com/docs/plans/hobby) · [Vercel terms](https://vercel.com/legal/terms)
+- **GitHub Actions** schedules about 2,880 jobs per 30 days. A 1–3 minute runtime per job is an unmeasured estimate of 2,880–8,640 runner minutes, with archive or unusually busy runs potentially taking longer. The repository is currently public and standard runner usage is free on public repositories. A private GitHub Free repository has 2,000 included minutes, below even the one-minute-per-job estimate for around-the-clock operation. A tick still uses a runner when the saved window or interval skips scraping. GitHub can delay or drop scheduled jobs and disables schedules in inactive public repositories after 60 days. Its product terms restrict disproportionate usage and specifically identify serverless application workloads as an example. Confirm permission for this production worker pattern before enabling it. Free runner billing does not establish permitted production use. [Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions) · [Scheduling behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule) · [Actions terms](https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features)
+- **Neon Free** currently advertises 100 CU-hours, 1 GB PostgreSQL storage, and 5 GB public transfer per project per month. Verify the existing project's allowance. At 0.25 CU with a five-minute idle tail and 30 seconds to two minutes of compute-open time per tick, 2,880 well-spaced ticks alone estimate 66–84 CU-hours. Dashboard polling, archive jobs, restarts, and autoscaling can push the project past quota. Continuous operation at 0.25 CU would use 180 CU-hours in 30 days. The temporary raw-upload cap is 120 MiB of declared bytes, with PostgreSQL table, WAL, and other overhead additional. Forty 40 MiB uploads can use roughly 1.56 GiB of downloaded raw bytes, potentially about 3.13 GiB on the database connection with hexadecimal `bytea` transfer. Inspect provisioned compute, storage headroom, and transfer before rollout. [Neon pricing and limits](https://neon.com/pricing)
+- **Generative AI** could technically run on a hosted runner for an isolated experiment. The standard public Linux runner has 4 CPUs, 16 GB RAM and 14 GB disk, and the existing Ollama Llama 3.1 8B download is about 4.7 GB. Cold setup, cache churn, CPU inference latency, and permitted-use concerns make it unsuitable as a guaranteed equivalent for each scheduled production run without a separate approved benchmark. Built-in summaries are deterministic. [GitHub runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) · [Ollama model listing](https://ollama.com/library/llama3.1/tags)
+
+## Environment variables
+
+Configure values in platform settings. Keep credentials out of committed files, the frontend build, artifacts, and logs.
+
+| Location | Names and purpose |
 | --- | --- |
-| `EMAIL_NOTIFICATIONS_ENABLED`, `EMAIL_RECIPIENTS` (legacy `EMAIL_RECIPIENT`), `EMAIL_SAME_DAY_ONLY` | Alert defaults. Saved settings in Neon take precedence. Verify the saved recipient list before enabling live sends. |
-| `EMAIL_FROM`, `EMAIL_FROM_NAME`, `EMAIL_MAX_ATTACHMENT_MB` | Sender address, optional name, and existing attachment limit. |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_SECURE` | Existing custom SMTP transport. Verify host reachability, TLS and permitted outbound ports from the chosen host. |
-| `EMAIL_APP_PASSWORD` | Existing Gmail fallback credential when using the Gmail transport. Keep it on the host. |
-| `SUMMARY_PROVIDER`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Existing summary configuration. If Ollama runs on the same host, the loopback default can stay. If it runs elsewhere, use an approved private address reachable from Express. GitHub and Vercel do not need access to Ollama. |
-| `ANTHROPIC_API_KEY`, `CLAUDE_MODEL` | Required only for existing Claude usage. Review the saved summary provider before enabling the monitor. Keep existing providers and billing choices. |
+| Vercel server | `DATABASE_URL` is the TLS-verified **pooled** Neon URL. `FRONTEND_URL` contains exact allowed HTTPS origins. Set `API_OPERATOR_USERNAME` and a unique `API_OPERATOR_PASSWORD` of at least 20 characters. Enable exposure of the Vercel system environment so the runtime and build receive `VERCEL=1`. |
+| Vercel browser build | Unset `VITE_API_BASE_URL` to use same-origin `/api`. |
+| GitHub Actions secrets | `DATABASE_URL` is the TLS-verified **direct** Neon URL for the same database branch. Set `EMAIL_APP_PASSWORD` for existing Gmail SMTP, or `SMTP_PASSWORD` for the existing custom SMTP transport. |
+| GitHub Actions variables | Keep `DGCA_MONITOR_ENABLED=false` until approval. Optional defaults and overrides are `MONITOR_INTERVAL_MINUTES`, `MONITOR_INTERVAL_HOURS`, `MONITOR_START_HOUR`, `MONITOR_END_HOUR`, `SCRAPER_TIMEOUT_MS`, `SCRAPER_RETRY_ATTEMPTS`, `EMAIL_NOTIFICATIONS_ENABLED`, `EMAIL_SAME_DAY_ONLY`, `EMAIL_FROM`, `EMAIL_FROM_NAME`, `EMAIL_RECIPIENTS`, `EMAIL_MAX_ATTACHMENT_MB`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, and `SMTP_USER`. `SUMMARY_PROVIDER=basic` is the default for a database without a saved provider. Select it in Settings for an existing saved provider. `DGCA_ACTIONS_WORKER=1` is supplied by the workflow. |
+| Vercel status and settings defaults | Mirror nonsecret window, interval, summary, and email defaults so the dashboard describes the worker consistently. For email status, set `DGCA_WORKER_SMTP_CONFIGURED=true` once the worker SMTP secret is configured. SMTP passwords belong only in GitHub Actions. Saved Neon settings take precedence over defaults. |
 
-The API requires operator authentication for data, recipient settings, previews, uploads, and manual jobs. The workflow token permits only the scheduled trigger. Credentialed browser requests use exact CORS origins, and browser mutations enforce the origin. Authenticated responses are marked `no-store`. The operator credential provides access to the full dashboard. The app has no separate user roles, MFA, or identity-backed review attribution. Use existing organizational access controls if individual identities or permissions are required.
+## Deployment after approval
 
-## 2. Configure the React project on Vercel
+1. Confirm Vercel plan eligibility and GitHub permission for this production runner workload. Confirm that the existing SMTP endpoint works from GitHub-hosted runners and accepts the expected outbound ports and source addresses. Keep live delivery and the workflow gate off until smoke tests are complete.
+2. Use a disposable database for an initial rehearsal. The deployment migration expects the existing DGCA schema. Back up or confirm restore capability for the production database before any approved migration.
+3. With an explicitly selected database URL in the environment, run `npm ci` then `npm run deployment:schema` from `backend/node_api`. The migration is transactional and repeatable. It adds the notification claim column and index where missing, adds pending-diff metadata to CAR changes, and creates the job and upload tables. It leaves existing publication records intact.
+4. Import the approved repository revision in Vercel as **one** project rooted at the repository root. Choose the Vite preset and Node.js 24. Use the checked-in install command, build command and output directory. Configure the runtime variables and an available region close to Neon. Verify preview and production scopes reference the intended databases. The checked-in `git.deploymentEnabled: false` keeps pushes from triggering automatic deployments. Change that setting only when automatic deployment is approved.
+5. Confirm anonymous API requests are rejected, the expected operator can sign in, the old remote-trigger endpoint returns 404, and dashboard, search, settings and CSV work. Verify a 40 MiB upload, queued comparison, CAR refresh and archive analysis against disposable resources with the worker CLI. Verify hosted routing, chunk handling and streaming before cutover.
+6. Explicitly select the built-in summary engine and review recipients, saved interval, and the IST window. Confirm only one scheduler will be active. If another local Node or Python scheduler is currently active, stop it before enabling the Actions job.
+7. After approval and platform authorization, set `DGCA_MONITOR_ENABLED=true`, observe the first scheduled run and its Neon monitoring log, then verify the expected notifications with a controlled recipient. To pause, set the variable to `false` and wait for any in-progress run to finish or cancel it. Review delivery history before retrying uncertain sends.
 
-1. Import `dgca_monitor_indigo` with production branch `main`, root `frontend`, Vite framework, Node.js 24, build command `npm run build`, and output directory `dist`.
-2. Set `VITE_API_BASE_URL` to the backend's public HTTPS URL ending in `/api`, for example `https://api.monitor.example.org/api`. This is public build configuration. Keep all credentials and `DATABASE_URL` out of Vercel frontend variables. Connect directly to Express so Vercel never proxies PDF uploads.
-3. Prefer frontend and API domains on the same HTTPS site. Open the protected backend `/api/health` in the browser to establish the operator session, then open the frontend. Verify that the browsers your users use send the credential on API requests and can load email previews and CSV downloads. Restrict preview domains separately and avoid connecting untrusted previews to the production database.
+## Job API for existing external clients
 
-Local Vite development and preview keep using the loopback API through the Vite proxy. A bare static deployment elsewhere must set the backend URL or supply an equivalent same-origin API proxy.
+For a queued request, poll `GET /api/jobs/{jobId}` with operator authentication. `queued` and `running` are intermediate states. On `done` or `failed`, concatenate `chunk` in order using `?offset={next}` until `next` is null, parse the result JSON, and use the returned `status` as the operation status.
 
-## 3. Enable GitHub Actions monitoring after verification
+To upload, send `POST /api/compare/upload-sessions` with JSON `{name, bytes}`. Send each part in order via `PUT /api/compare/upload-sessions/{id}/{part}` as `application/octet-stream`, starting at part zero. Use the advertised chunk size for every part except the last. Finalize with `POST /api/compare/upload-sessions/{id}/finish` and poll the resulting job ID.
 
-| GitHub setting | Value |
-| --- | --- |
-| Repository variable `DGCA_MONITOR_API_ORIGIN` | Backend HTTPS origin, without `/api`. |
-| Actions secret `MONITOR_TRIGGER_TOKEN` | Same token as on the backend. |
-| Repository variable `DGCA_MONITOR_ENABLED` | Leave unset until cutover. Set to `true` only after reviewing runner capacity and stopping competing scheduled monitors. |
-| Repository variable `DGCA_MONITOR_RUNNER` | Optional label for an existing authorized runner. Defaults to `ubuntu-24.04`. |
+## Implementation files
 
-Switch the Express host to `MONITOR_SCHEDULER=github` and restart it before enabling the repository variable. The workflow requests a check every 15 minutes. Express respects the saved interval and IST window. A durable PostgreSQL slot suppresses repeated triggers, and a session lock prevents concurrent scheduled checks, manual checks, and manual test sends. An acknowledgement means the job was accepted or skipped. The Activity Log records the actual outcome. A delayed trigger evaluates the current slot and does not replay missed slots.
-
-Use only one production scheduler. The separate Python pipeline has its own `publications` state and can alert on the same DGCA notice. Keep it in preview mode if using it alongside the Express production monitor. For the Python/Streamlit workflow, the existing variables are `DATABASE_URL`, `CHECK_INTERVAL_MINUTES`, `LLM_PROVIDER`, `LLM_MODEL`, `OPENAI_API_KEY`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `EMAIL_PROVIDER`, `TEST_MODE`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `OUTLOOK_SENDER_EMAIL`, `OUTLOOK_RECIPIENT_EMAIL`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_CLIENT_SECRET`. Supply credentials only for the selected provider.
-
-An automatic email attempt is recorded before contacting SMTP. If the process stops before recording the outcome, the next cycle will not resend automatically. An operator can inspect affected records with a read-only database query and reconcile them with SMTP history. Use the existing test-email action for a deliberate resend after confirming delivery status. SMTP does not provide an exactly-once guarantee.
-
-```sql
-SELECT id, title, email_delivery_started_at
-FROM updates
-WHERE email_delivery_started_at IS NOT NULL AND email_status IS NULL;
-```
-
-## 4. Verify before traffic and before enabling live alerts
-
-Use a disposable database to test auth, PDF upload and comparison, settings, search, reviews, CAR refresh, archive resume, and scheduled retries. Use an approved test inbox for SMTP. On the production host, verify the existing Neon row counts and use PostgreSQL backups before changing the deployment. Starting the newer API adds a nullable delivery marker and a notification lookup index. It leaves existing records intact apart from the application's existing startup backfills. Coordinate cutover with older Express processes that do not honor the new lock and delivery marker.
-
-From `backend`, run `python -m unittest discover -s tests -t .`. From `backend/node_api`, run `npm ci` and `npm test`. Set `TEST_DATABASE_URL` for database tests and use a disposable **loopback** PostgreSQL database for Express integration tests. From `frontend`, run `npm ci` and `npm run build`.
+- Vercel entry and routing — `vercel.json`, `.vercelignore`, `api/dgca.mjs`, `frontend/vite.config.js`.
+- React transport and summary status — `frontend/src/api.js`, `frontend/src/pages/Settings.jsx`.
+- Direct workflow and worker — `.github/workflows/dgca-monitor.yml`, `backend/node_api/package.json`, `backend/node_api/src/scripts/actions-worker.js`, `backend/node_api/src/services/actions-worker.js`.
+- Database setup and persistence — `backend/node_api/src/scripts/setup-deployment.js`, `backend/node_api/src/config/database.js`, `backend/node_api/src/config/schema.sql`, `backend/node_api/src/config/deployment.sql`, `backend/node_api/src/services/job-service.js`, `backend/node_api/src/services/chunk-upload-service.js`.
+- Express entry, auth and routes — `backend/node_api/src/index.js`, `backend/node_api/src/config/access.js`, and the `archive.js`, `cars.js`, `compare.js`, `jobs.js`, `monitor.js`, `notifications.js`, `system.js`, and `updates.js` routes under `backend/node_api/src/routes`.
+- Shared services — the `archive-service.js`, `car-service.js`, `notification-service.js`, `scheduler-service.js`, `settings-service.js`, and `summary-service.js` files under `backend/node_api/src/services`, plus `backend/node_api/src/utils/send-payload.js`.
+- Verification and runbook — `backend/node_api/test/serverless.test.js` and this document.

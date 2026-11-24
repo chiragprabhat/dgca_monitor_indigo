@@ -5,6 +5,7 @@ import { getGitHubMonitoringSlot, getSchedulerStatus } from '../services/schedul
 import { getRecentLogs } from '../services/state-service.js';
 import { testEmailConnection, isEmailEnabled } from '../services/notification-service.js';
 import { getDatabase } from '../config/database.js';
+import { queueRoute } from '../services/job-service.js';
 
 const router = express.Router();
 
@@ -22,7 +23,7 @@ export const scheduledMonitor = asyncRoute(async (req, res) => {
   res.status(503).json({ accepted: false, reason: 'Unable to start monitoring' });
 });
 
-router.post('/trigger', async (req, res) => {
+router.post('/trigger', queueRoute('monitor'), async (req, res) => {
   try {
     const result = await checkForUpdates();
     res.json({
@@ -129,7 +130,7 @@ router.get('/logs', asyncRoute(async (req, res) => {
   res.json({ data, timestamp: new Date().toISOString() });
 }));
 
-router.get('/test-email', async (req, res) => {
+router.get('/test-email', queueRoute('smtp-check'), async (req, res) => {
   try {
     const result = await testEmailConnection();
     res.json({
