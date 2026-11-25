@@ -1,0 +1,77 @@
+name: DGCA hosted Vercel job smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type RUN HOSTED SYNTHETIC TEST after checking the immutable Vercel deployment URL
+        required: true
+        type: string
+      deployment_url:
+        description: Paste the generated deployment URL for the approved SHA from Vercel
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dgca-hosted-job-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke-test:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.DGCA_MONITOR_ENABLED == 'false' &&
+      vars.EMAIL_NOTIFICATIONS_ENABLED == 'false' &&
+      inputs.confirmation == 'RUN HOSTED SYNTHETIC TEST'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check exact manual authorization
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          CONFIRMED_URL: ${{ inputs.deployment_url }}
+          APPROVED_URL: ${{ vars.HOSTED_SMOKE_URL }}
+          MONITOR_ENABLED: ${{ vars.DGCA_MONITOR_ENABLED }}
+          NOTIFICATIONS_ENABLED: ${{ vars.EMAIL_NOTIFICATIONS_ENABLED }}
+        run: |
+          test "$CONFIRMATION" = 'RUN HOSTED SYNTHETIC TEST'
+          test -n "$APPROVED_URL"
+          test "$CONFIRMED_URL" = "$APPROVED_URL"
+          test "$MONITOR_ENABLED" = 'false'
+          test "$NOTIFICATIONS_ENABLED" = 'false'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: 88d059b531993cd34e05bbf90339faf235c4b356
+          path: pinned-app
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: pinned-app/backend/node_api/package-lock.json
+      - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+        working-directory: pinned-app/backend/node_api
+      - name: Process only the synthetic jobs created by the hosted API
+        env:
+          DGCA_MONITOR_ENABLED: ${{ vars.DGCA_MONITOR_ENABLED }}
+          EMAIL_NOTIFICATIONS_ENABLED: ${{ vars.EMAIL_NOTIFICATIONS_ENABLED }}
+          HOSTED_SMOKE_CONFIRMATION: ${{ inputs.confirmation }}
+          HOSTED_SMOKE_CONFIRMED_URL: ${{ inputs.deployment_url }}
+          HOSTED_SMOKE_URL: ${{ vars.HOSTED_SMOKE_URL }}
+          HOSTED_SMOKE_TEST_RUN_ID: ${{ vars.HOSTED_SMOKE_TEST_RUN_ID }}
+          HOSTED_SMOKE_TEST_RUN_AT: ${{ vars.HOSTED_SMOKE_TEST_RUN_AT }}
+          HOSTED_SMOKE_OPERATOR_USERNAME: ${{ secrets.HOSTED_SMOKE_OPERATOR_USERNAME }}
+          HOSTED_SMOKE_OPERATOR_PASSWORD: ${{ secrets.HOSTED_SMOKE_OPERATOR_PASSWORD }}
+          HOSTED_SMOKE_VERCEL_BYPASS: ${{ secrets.HOSTED_SMOKE_VERCEL_BYPASS }}
+          DEPLOYMENT_TEST_DATABASE_URL: ${{ secrets.DEPLOYMENT_TEST_DATABASE_URL }}
+          DEPLOYMENT_TEST_NEON_HOST: ${{ vars.DEPLOYMENT_TEST_NEON_HOST }}
+          PRODUCTION_NEON_HOST: ${{ vars.PRODUCTION_NEON_HOST }}
+          LOG_LEVEL: warn
+        run: node ops/hosted-job-smoke.mjs
