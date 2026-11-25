@@ -58,6 +58,19 @@ function senderName() {
   return process.env.EMAIL_FROM_NAME || 'DGCA Regulatory Alerts';
 }
 
+function createSmtpTransport({ host, port, secure, user, pass }, extra = {}) {
+  const { tls, ...options } = extra;
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    requireTLS: !secure && port === 587,
+    tls: { ca: getTrustedCAs(), ...tls },
+    ...(user && pass ? { auth: { user, pass } } : {}),
+    ...options
+  });
+}
+
 export async function initializeEmailService() {
   if (!await isEmailEnabled()) return null;
   if (transporter) return transporter;
@@ -69,14 +82,7 @@ export async function initializeEmailService() {
   if (host) {
     const port = parseInt(process.env.SMTP_PORT || '587', 10);
     const secure = process.env.SMTP_SECURE === 'true' || port === 465;
-    transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure,
-      requireTLS: !secure && port === 587,
-      tls: { ca: getTrustedCAs() },
-      ...(user && pass ? { auth: { user, pass } } : {})
-    });
+    transporter = createSmtpTransport({ host, port, secure, user, pass });
     logger.info(`Email service initialized (SMTP ${host}:${port})`);
   } else {
     if (!user || !pass) {
@@ -87,6 +93,18 @@ export async function initializeEmailService() {
     logger.info('Email service initialized (Gmail)');
   }
   return transporter;
+}
+
+function pdfAttachments(pdf, enabled, maxBytes) {
+  if (!pdf?.buffer) return { attachments: [], attachmentNote: 'no PDF' };
+  if (!enabled) return { attachments: [], attachmentNote: 'PDF attachments turned off in Settings - link only' };
+  if (pdf.buffer.length <= maxBytes) {
+    return {
+      attachments: [{ filename: pdf.filename, content: pdf.buffer, contentType: 'application/pdf' }],
+      attachmentNote: `attached ${pdf.filename}`
+    };
+  }
+  return { attachments: [], attachmentNote: `PDF too large to attach (${(pdf.buffer.length / 1048576).toFixed(1)} MB) - link only` };
 }
 
 // update: a row from the updates table. analysis/pdf come from the monitor cycle.
@@ -101,17 +119,8 @@ export async function sendNotification(update, { analysis, pdf, automatic, asser
   if (recipients.length === 0) return { success: false, error: 'No recipients (set EMAIL_RECIPIENTS)' };
 
   const email = renderEmail(update, analysis);
-  const attachments = [];
   const maxBytes = parseFloat(process.env.EMAIL_MAX_ATTACHMENT_MB || '15') * 1024 * 1024;
-  let attachmentNote = 'no PDF';
-  if (pdf?.buffer && !(await getSettings()).attachPdf) {
-    attachmentNote = 'PDF attachments turned off in Settings - link only';
-  } else if (pdf?.buffer && pdf.buffer.length <= maxBytes) {
-    attachments.push({ filename: pdf.filename, content: pdf.buffer, contentType: 'application/pdf' });
-    attachmentNote = `attached ${pdf.filename}`;
-  } else if (pdf?.buffer) {
-    attachmentNote = `PDF too large to attach (${(pdf.buffer.length / 1048576).toFixed(1)} MB) - link only`;
-  }
+  const { attachments, attachmentNote } = pdfAttachments(pdf, pdf?.buffer && (await getSettings()).attachPdf, maxBytes);
 
   assertHeld?.();
   const claimed = await claimEmailDelivery(update.id);
@@ -137,6 +146,58 @@ export async function sendNotification(update, { analysis, pdf, automatic, asser
     logger.error('Failed to send email:', { error: reason, updateId: update.id });
     await logNotification(update.id, recipients.join(', '), 'failed', reason);
     return { success: false, error: reason };
+  }
+}
+
+const SAFE_SMTP_CODES = new Set(['EAUTH', 'ECONNECTION', 'ECONNREFUSED', 'ECONNRESET', 'EENVELOPE',
+  'EMESSAGE', 'ENOTFOUND', 'ESOCKET', 'ETIMEDOUT', 'ETLS']);
+
+export async function sendEmailDeliverySmokeTest({ appPassword, pdf, claimDelivery }) {
+  const smoke = monitoringSmokeTest();
+  if (!smoke?.emailDelivery || !smoke.connectionVerified) {
+    throw new Error('A verified email delivery smoke-test context is required');
+  }
+  if (!appPassword) throw new Error('The Gmail app password is required');
+  const from = 'dgcamonitor@gmail.com';
+  const to = 'chirag131004@gmail.com';
+  const label = 'TEST ONLY - Synthetic DGCA email delivery check';
+  const email = renderEmail({ title: label, section: 'regulation' }, {
+    source: 'basic', priority: 'low',
+    summary: 'This is a test message. The attached PDF is a synthetic fixture. No action is required.'
+  });
+  const { attachments } = pdfAttachments(pdf, true, 1024 * 1024);
+  if (attachments.length !== 1) throw new Error('The synthetic PDF attachment is required');
+  const smtp = createSmtpTransport({ host: 'smtp.gmail.com', port: 465, secure: true, user: from, pass: appPassword }, {
+    tls: { rejectUnauthorized: true },
+    disableFileAccess: true,
+    disableUrlAccess: true,
+    connectionTimeout: 20000,
+    greetingTimeout: 20000,
+    socketTimeout: 30000
+  });
+  try {
+    if (!await smtp.verify()) return { outcome: 'smtp-verification-failed' };
+  } catch (error) {
+    return { outcome: 'smtp-verification-failed', code: SAFE_SMTP_CODES.has(error?.code) ? error.code : undefined };
+  }
+  if (!await claimDelivery()) return { outcome: 'already-claimed', smtpVerified: true };
+  try {
+    const result = await smtp.sendMail({
+      from: { name: 'DGCA Monitor Test', address: from },
+      to,
+      envelope: { from, to: [to] },
+      subject: '[TEST ONLY] DGCA email delivery smoke test',
+      html: email.html,
+      text: email.text,
+      attachments
+    });
+    if (result.accepted?.length === 1 && result.accepted[0] === to && !result.rejected?.length) {
+      return { outcome: 'accepted-by-smtp', smtpVerified: true, attempted: true };
+    }
+    return { outcome: 'smtp-delivery-unconfirmed', smtpVerified: true, attempted: true };
+  } catch (error) {
+    return { outcome: 'smtp-delivery-unconfirmed', smtpVerified: true, attempted: true,
+      code: SAFE_SMTP_CODES.has(error?.code) ? error.code : undefined };
   }
 }
 

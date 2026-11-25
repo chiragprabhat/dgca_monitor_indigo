@@ -12,7 +12,7 @@ function getPool() {
   const smoke = monitoringSmokeTest();
   const existing = smoke ? smoke.pool : pool;
   if (existing) return existing;
-  const connectionString = smoke?.target.connectionString ?? process.env.DATABASE_URL;
+  const connectionString = smoke ? smoke.target?.connectionString : process.env.DATABASE_URL;
   if (!connectionString) throw new Error('DATABASE_URL is required');
 
   const url = new URL(connectionString);
@@ -65,7 +65,8 @@ export function getDatabase() {
 }
 
 export function requireDirectMonitoringConnection() {
-  const connectionString = monitoringSmokeTest()?.target.connectionString ?? process.env.DATABASE_URL;
+  const smoke = monitoringSmokeTest();
+  const connectionString = smoke ? smoke.target?.connectionString : process.env.DATABASE_URL;
   if (!connectionString) throw new Error('DATABASE_URL is required');
   if (new URL(connectionString).hostname.includes('-pooler.')) {
     throw new Error('DGCA monitoring requires a direct Neon DATABASE_URL for its session lock');
@@ -75,6 +76,7 @@ export function requireDirectMonitoringConnection() {
 export async function verifyMonitoringSmokeConnection() {
   const smoke = monitoringSmokeTest();
   if (!smoke) throw new Error('Monitoring smoke-test context required');
+  smoke.connectionVerified = false;
   const { hostname, databaseName } = smoke.target;
   const client = await getPool().connect();
   try {
@@ -93,6 +95,7 @@ export async function verifyMonitoringSmokeConnection() {
         info.in_recovery !== false || info.read_only !== 'off') {
       throw Object.assign(new Error('Expected the writable test database and public schema'), { code: 'SMOKE_DATABASE' });
     }
+    smoke.connectionVerified = true;
   } finally {
     client.release();
   }
@@ -172,7 +175,9 @@ export async function initializeDatabase() {
 export async function closeDatabase() {
   const smoke = monitoringSmokeTest();
   const current = smoke ? smoke.pool : pool;
-  if (smoke) smoke.pool = undefined;
-  else pool = undefined;
+  if (smoke) {
+    smoke.pool = undefined;
+    smoke.connectionVerified = false;
+  } else pool = undefined;
   await current?.end();
 }
