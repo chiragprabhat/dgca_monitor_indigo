@@ -1,5 +1,6 @@
 import { getDatabase, transaction } from '../config/database.js';
 import { createLogger } from '../utils/logger.js';
+import { monitoringSmokeTest } from '../config/monitoring-smoke-context.js';
 
 const logger = createLogger('settings');
 
@@ -22,7 +23,7 @@ function envDefaults() {
     minPriority: 'low',
     attachPdf: true,
     intervalMinutes: parseInt(process.env.MONITOR_INTERVAL_MINUTES || '', 10) || legacyHours || 15,
-    summaryProvider: (process.env.SUMMARY_PROVIDER || 'auto').toLowerCase()
+    summaryProvider: monitoringSmokeTest() ? 'basic' : (process.env.SUMMARY_PROVIDER || 'auto').toLowerCase()
   };
 }
 
@@ -35,14 +36,14 @@ async function readSettings(db) {
       if (key in settings) settings[key] = JSON.parse(value);
     }
   } catch (error) {
-    if (process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1') throw error;
+    if (monitoringSmokeTest() || process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1') throw error;
     logger.error('Could not read saved settings; using .env values', { error: error.message });
   }
   return settings;
 }
 
 export async function getSettings() {
-  if (process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1') return readSettings(getDatabase());
+  if (monitoringSmokeTest() || process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1') return readSettings(getDatabase());
   cache ??= readSettings(getDatabase());
   return cache;
 }

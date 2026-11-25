@@ -1,16 +1,21 @@
 import { readFile } from 'node:fs/promises';
+import { checkServerIdentity } from 'node:tls';
 import pg from 'pg';
 import { createLogger } from '../utils/logger.js';
+import { monitoringSmokeTest } from './monitoring-smoke-context.js';
 
 const logger = createLogger('database');
 const schema = new URL('./schema.sql', import.meta.url);
 let pool;
 
 function getPool() {
-  if (pool) return pool;
-  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+  const smoke = monitoringSmokeTest();
+  const existing = smoke ? smoke.pool : pool;
+  if (existing) return existing;
+  const connectionString = smoke?.target.connectionString ?? process.env.DATABASE_URL;
+  if (!connectionString) throw new Error('DATABASE_URL is required');
 
-  const url = new URL(process.env.DATABASE_URL);
+  const url = new URL(connectionString);
   if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname || url.searchParams.has('host') || url.searchParams.has('hostaddr')) {
     throw new Error('DATABASE_URL must specify the PostgreSQL host in the URL authority');
   }
@@ -20,7 +25,7 @@ function getPool() {
     url.searchParams.delete(key);
   }
 
-  pool = new pg.Pool({
+  const created = new pg.Pool({
     connectionString: url.toString(),
     ssl,
     enableChannelBinding: true,
@@ -33,8 +38,10 @@ function getPool() {
         ? Number : pg.types.getTypeParser(oid, format)
     }
   });
-  pool.on('error', error => logger.error('Idle database connection failed', { error: error.message }));
-  return pool;
+  created.on('error', error => logger.error('Idle database connection failed', { error: error.message }));
+  if (smoke) smoke.pool = created;
+  else pool = created;
+  return created;
 }
 
 function database(client) {
@@ -58,9 +65,36 @@ export function getDatabase() {
 }
 
 export function requireDirectMonitoringConnection() {
-  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
-  if (new URL(process.env.DATABASE_URL).hostname.includes('-pooler.')) {
+  const connectionString = monitoringSmokeTest()?.target.connectionString ?? process.env.DATABASE_URL;
+  if (!connectionString) throw new Error('DATABASE_URL is required');
+  if (new URL(connectionString).hostname.includes('-pooler.')) {
     throw new Error('DGCA monitoring requires a direct Neon DATABASE_URL for its session lock');
+  }
+}
+
+export async function verifyMonitoringSmokeConnection() {
+  const smoke = monitoringSmokeTest();
+  if (!smoke) throw new Error('Monitoring smoke-test context required');
+  const { hostname, databaseName } = smoke.target;
+  const client = await getPool().connect();
+  try {
+    const socket = client.connection?.stream;
+    const certificate = socket?.encrypted === true && socket.authorized === true
+      ? socket.getPeerCertificate()
+      : null;
+    if (!certificate || checkServerIdentity(hostname, certificate)) {
+      throw Object.assign(new Error('Test database certificate could not be verified'), { code: 'SMOKE_TLS' });
+    }
+    const { rows: [info] } = await client.query(`
+      SELECT current_database() AS database_name, current_schema() AS schema_name,
+             pg_is_in_recovery() AS in_recovery, current_setting('transaction_read_only') AS read_only
+    `);
+    if (info.database_name !== databaseName || info.schema_name !== 'public' ||
+        info.in_recovery !== false || info.read_only !== 'off') {
+      throw Object.assign(new Error('Expected the writable test database and public schema'), { code: 'SMOKE_DATABASE' });
+    }
+  } finally {
+    client.release();
   }
 }
 
@@ -136,9 +170,9 @@ export async function initializeDatabase() {
 }
 
 export async function closeDatabase() {
-  if (pool) {
-    const current = pool;
-    pool = undefined;
-    await current.end();
-  }
+  const smoke = monitoringSmokeTest();
+  const current = smoke ? smoke.pool : pool;
+  if (smoke) smoke.pool = undefined;
+  else pool = undefined;
+  await current?.end();
 }

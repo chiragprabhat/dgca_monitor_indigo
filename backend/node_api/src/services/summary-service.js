@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import axios from 'axios';
+import { monitoringSmokeTest } from '../config/monitoring-smoke-context.js';
 import { createLogger } from '../utils/logger.js';
 import { classifyPriority, extractDeadline } from './priority-service.js';
 import { getSettings } from './settings-service.js';
@@ -37,6 +38,7 @@ Priority, from the airline's point of view:
 let anthropicClient = null;
 
 export async function getSummaryProvider() {
+  if (monitoringSmokeTest()) return 'basic';
   const configured = (await getSettings()).summaryProvider;
   if (process.env.DGCA_ACTIONS_WORKER === '1' && configured !== 'basic') {
     throw Object.assign(new Error('Select the built-in summary engine in Settings before running monitoring on GitHub Actions'), { status: 409 });

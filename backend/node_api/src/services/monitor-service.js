@@ -8,6 +8,7 @@ import { getSettings } from './settings-service.js';
 import { acquireMonitoringLock, getDatabase } from '../config/database.js';
 import { createLogger } from '../utils/logger.js';
 import { compareWithPrevious } from './revision-service.js';
+import { monitoringSmokeTest } from '../config/monitoring-smoke-context.js';
 
 const logger = createLogger('monitor-service');
 
@@ -100,6 +101,8 @@ async function processNewUpdate(update, assertHeld) {
   const stored = await getDatabase().prepare('SELECT * FROM updates WHERE id = $1').get(update.id);
   const revision = await compareWithPrevious(stored);
   if (revision) logger.info(`"${title}" revises "${revision.previous.title.slice(0, 60)}" (${revision.stats ? `${revision.stats.added} added, ${revision.stats.removed} removed` : 'text not comparable'})`);
+
+  if (monitoringSmokeTest()) return false;
 
   if (!await isEmailEnabled()) {
     await setEmailStatus(update.id, 'not sent - email notifications disabled');

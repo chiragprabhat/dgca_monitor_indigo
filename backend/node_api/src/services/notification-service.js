@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import { getDatabase } from '../config/database.js';
+import { monitoringSmokeTest } from '../config/monitoring-smoke-context.js';
 import { createLogger } from '../utils/logger.js';
 import { claimEmailDelivery, markAsNotified } from './state-service.js';
 import { daysUntil } from './priority-service.js';
@@ -41,6 +42,7 @@ const PRIORITY_STYLE = {
 };
 
 export async function isEmailEnabled() {
+  if (monitoringSmokeTest()) return false;
   return (await getSettings()).emailEnabled;
 }
 
@@ -341,6 +343,7 @@ export async function getNotificationHistory(limit = 20) {
 }
 
 export async function testEmailConnection() {
+  if (monitoringSmokeTest()) return { success: false, error: 'Email disabled for monitoring smoke test' };
   if (!transporter) transporter = await initializeEmailService();
   if (!transporter) return { success: false, error: await isEmailEnabled() ? 'Email service not configured' : 'Email notifications disabled' };
   try {
