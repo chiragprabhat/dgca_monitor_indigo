@@ -47,6 +47,21 @@ const handlers = {
   }
 };
 
+export async function processActionsJob(job, assertHeld) {
+  let outcome;
+  try {
+    const handler = Object.hasOwn(handlers, job.kind) && handlers[job.kind];
+    if (!handler) throw new Error('Unknown worker job');
+    outcome = await handler(job.input, job);
+  } catch (error) {
+    const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+    outcome = ok({ success: false, error: status === 500 ? 'Background operation failed. Check the runner logs.' : error.message }, status);
+    console.error('DGCA job failed:', job.kind, error.code || error.name);
+  }
+  assertHeld();
+  await finishJob(job, outcome.status, outcome.result);
+}
+
 export async function runActionsWorker(now = new Date()) {
   if (process.env.DGCA_ACTIONS_WORKER !== '1' || process.env.DGCA_MONITOR_ENABLED !== 'true') {
     throw new Error('The GitHub Actions worker is disabled');
@@ -98,18 +113,7 @@ export async function runActionsWorker(now = new Date()) {
         }
         analyzedArchive = true;
       }
-      let outcome;
-      try {
-        const handler = Object.hasOwn(handlers, job.kind) && handlers[job.kind];
-        if (!handler) throw new Error('Unknown worker job');
-        outcome = await handler(job.input, job);
-      } catch (error) {
-        const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
-        outcome = ok({ success: false, error: status === 500 ? 'Background operation failed. Check the runner logs.' : error.message }, status);
-        console.error('DGCA job failed:', job.kind, error.code || error.name);
-      }
-      workerLock.assertHeld();
-      await finishJob(job, outcome.status, outcome.result);
+      await processActionsJob(job, workerLock.assertHeld);
       processed++;
     }
     return { processed, monitoring };

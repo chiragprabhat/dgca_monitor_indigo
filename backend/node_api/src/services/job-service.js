@@ -68,14 +68,14 @@ export async function recoverJobs() {
   });
 }
 
-export async function claimJob() {
+export async function claimJob(id = null) {
   const { rows: [job] } = await getDatabase().query(`
     UPDATE dgca_jobs SET state = 'running' WHERE id = (
-      SELECT id FROM dgca_jobs WHERE state = 'queued'
+      SELECT id FROM dgca_jobs WHERE state = 'queued' AND ($1::uuid IS NULL OR id = $1)
       ORDER BY (kind IN ('archive', 'car')), created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
     )
     RETURNING id, kind, input
-  `);
+  `, [id]);
   return job;
 }
 

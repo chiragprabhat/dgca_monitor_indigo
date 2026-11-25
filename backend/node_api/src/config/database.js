@@ -1,8 +1,9 @@
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { checkServerIdentity } from 'node:tls';
 import pg from 'pg';
 import { createLogger } from '../utils/logger.js';
-import { monitoringSmokeTest } from './monitoring-smoke-context.js';
+import { monitoringSmokeTest, runWithBackgroundSmokeClient } from './monitoring-smoke-context.js';
 
 const logger = createLogger('database');
 const schema = new URL('./schema.sql', import.meta.url);
@@ -61,7 +62,7 @@ function database(client) {
 }
 
 export function getDatabase() {
-  return database(getPool());
+  return database(monitoringSmokeTest()?.backgroundClient ?? getPool());
 }
 
 export function requireDirectMonitoringConnection() {
@@ -98,6 +99,47 @@ export async function verifyMonitoringSmokeConnection() {
     smoke.connectionVerified = true;
   } finally {
     client.release();
+  }
+}
+
+export async function withBackgroundSmokeDatabase(callback) {
+  const smoke = monitoringSmokeTest();
+  if (!smoke || smoke.backgroundClient) throw new Error('A smoke-test context is required');
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(smoke.target.connectionString).hostname);
+  if (!local && !smoke.connectionVerified) {
+    throw new Error('A verified smoke-test database is required');
+  }
+  const namespace = `dgca_smoke_${randomUUID().replaceAll('-', '')}`;
+  const client = await getPool().connect();
+  let connectionError;
+  let releaseError;
+  const rememberError = error => { connectionError ??= error; };
+  client.on('error', rememberError);
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL statement_timeout = '45s'; SET LOCAL idle_in_transaction_session_timeout = '120s'");
+    await client.query(`CREATE SCHEMA ${namespace}; SET LOCAL search_path TO ${namespace}, pg_catalog`);
+    const applicationSchema = await readFile(schema, 'utf8');
+    // The smoke exercises queues and documents, not the shared public search configuration.
+    const searchSetup = applicationSchema.indexOf('CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA public;');
+    if (searchSetup < 0) throw new Error('Cannot isolate application schema from public search setup');
+    await client.query(applicationSchema.slice(0, searchSetup));
+    const deploymentSchema = await readFile(new URL('./deployment.sql', import.meta.url), 'utf8');
+    await client.query(deploymentSchema);
+    return await runWithBackgroundSmokeClient(client, () => callback(namespace));
+  } finally {
+    try {
+      if (connectionError) throw connectionError;
+      await client.query('ROLLBACK');
+      const { rows: [row] } = await client.query('SELECT pg_catalog.to_regnamespace($1) IS NULL AS removed', [namespace]);
+      if (!row.removed) throw new Error('Smoke-test schema rollback was not verified');
+    } catch (error) {
+      releaseError = error;
+      throw error;
+    } finally {
+      client.release(releaseError);
+      client.off('error', rememberError);
+    }
   }
 }
 
@@ -139,6 +181,20 @@ export async function acquireMonitoringLock(key = 4) {
 }
 
 export async function transaction(callback) {
+  const smoke = monitoringSmokeTest();
+  if (smoke?.backgroundClient) {
+    const client = smoke.backgroundClient;
+    const savepoint = `dgca_nested_${++smoke.savepoint}`;
+    await client.query(`SAVEPOINT ${savepoint}`);
+    try {
+      const result = await callback(database(client));
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      return result;
+    } catch (error) {
+      await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`);
+      throw error;
+    }
+  }
   const client = await getPool().connect();
   let releaseError;
   try {

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { getDatabase, transaction } from '../config/database.js';
 import { MAX_UPLOAD_BYTES, storeUpload } from './upload-service.js';
 import { enqueueJob } from './job-service.js';
+import { monitoringSmokeTest } from '../config/monitoring-smoke-context.js';
 
 export const CHUNK_BYTES = 3 * 1024 * 1024;
 const RESERVATION_LIMIT = MAX_UPLOAD_BYTES * 3;
@@ -11,7 +12,8 @@ export async function openUpload(filename, bytes) {
   if (!Number.isInteger(bytes) || bytes < 1) throw fail('No file received', 400);
   if (bytes > MAX_UPLOAD_BYTES) throw fail('PDF exceeds the 40 MiB upload limit', 413);
   return transaction(async db => {
-    await db.query('SELECT pg_advisory_xact_lock(13691, 6)');
+    const namespace = monitoringSmokeTest()?.backgroundClient ? 13695 : 13691;
+    await db.query('SELECT pg_advisory_xact_lock($1, 6)', [namespace]);
     await db.query('DELETE FROM dgca_upload_sessions WHERE job_id IS NULL AND expires_at < now()');
     const { total } = await db.prepare('SELECT COALESCE(sum(bytes), 0) AS total FROM dgca_upload_sessions').get();
     if (total + bytes > RESERVATION_LIMIT) throw fail('PDF upload storage is busy. Try again after an upload finishes.', 429);
