@@ -42,10 +42,10 @@ export async function saveUpdate(update, options = {}) {
         await db.query("SELECT pg_advisory_xact_lock(13693, hashtext($1))", [attachId]);
         const existing = await db.prepare('SELECT id, title, in_dgca_archive FROM updates WHERE attach_id = $1').get(attachId);
         if (existing) {
-          if (DEVANAGARI.test(existing.title) && !DEVANAGARI.test(update.title)) {
+          if (!options.preserveExisting && DEVANAGARI.test(existing.title) && !DEVANAGARI.test(update.title)) {
             await db.prepare('UPDATE updates SET title = $1, revision_key = $2 WHERE id = $3').run(update.title, revisionKey(update.title) || '', existing.id);
           }
-          if (update.inArchive && !existing.in_dgca_archive) {
+          if (!options.preserveExisting && update.inArchive && !existing.in_dgca_archive) {
             await db.prepare('UPDATE updates SET in_dgca_archive = 1 WHERE id = $1').run(existing.id);
           }
           return { id: existing.id, isNew: false, hash };

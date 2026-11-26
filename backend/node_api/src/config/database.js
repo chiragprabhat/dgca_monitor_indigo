@@ -78,7 +78,7 @@ export async function verifyMonitoringSmokeConnection() {
   const smoke = monitoringSmokeTest();
   if (!smoke) throw new Error('Monitoring smoke-test context required');
   smoke.connectionVerified = false;
-  const { hostname, databaseName } = smoke.target;
+  const { hostname, databaseName, neonIdentity } = smoke.target;
   const client = await getPool().connect();
   try {
     const socket = client.connection?.stream;
@@ -95,6 +95,17 @@ export async function verifyMonitoringSmokeConnection() {
     if (info.database_name !== databaseName || info.schema_name !== 'public' ||
         info.in_recovery !== false || info.read_only !== 'off') {
       throw Object.assign(new Error('Expected the writable test database and public schema'), { code: 'SMOKE_DATABASE' });
+    }
+    if (neonIdentity) {
+      const { rows: [identity] } = await client.query(`
+        SELECT current_user AS role, current_setting('neon.project_id', true) AS project,
+               current_setting('neon.branch_id', true) AS branch,
+               current_setting('neon.endpoint_id', true) AS endpoint
+      `);
+      if (identity.role !== neonIdentity.role || identity.project !== neonIdentity.project ||
+          identity.branch !== neonIdentity.branch || identity.endpoint !== hostname.split('.')[0]) {
+        throw Object.assign(new Error('Database identity check failed'), { code: 'SMOKE_DATABASE' });
+      }
     }
     smoke.connectionVerified = true;
   } finally {

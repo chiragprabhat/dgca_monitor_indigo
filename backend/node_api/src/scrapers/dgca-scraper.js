@@ -50,19 +50,19 @@ async function fetchWithRetry(url, method = 'get', attempt = 1) {
   }
 }
 
-export async function scrapeAllSections() {
+export async function scrapeAllSections({ strict = false } = {}) {
   const startTime = Date.now();
+  const sectionResults = {};
 
   try {
     const html = await fetchWithRetry(DGCA_BASE_URL);
     const $ = load(html);
     const allUpdates = [];
-    const sectionResults = {};
 
     for (const [sectionKey, config] of Object.entries(SECTIONS)) {
       let items;
       try {
-        const current = (await fetchMoreList(sectionKey)).filter(i => !i.inArchive);
+        const current = (await fetchMoreList(sectionKey, { strict })).filter(i => !i.inArchive);
         if (current.length) {
           sectionResults[sectionKey] = current.length;
           allUpdates.push(...current);
@@ -74,7 +74,7 @@ export async function scrapeAllSections() {
       }
       try {
         if (config.ajaxClassification) {
-          items = await fetchAjaxTab(sectionKey, config.ajaxClassification);
+          items = await fetchAjaxTab(sectionKey, config.ajaxClassification, strict);
         } else {
           const $pane = $(`.tab-pane#${config.paneId}`);
           if ($pane.length === 0) {
@@ -82,7 +82,7 @@ export async function scrapeAllSections() {
             sectionResults[sectionKey] = 'missing';
             continue;
           }
-          items = parsePane($, $pane, sectionKey);
+          items = parsePane($, $pane, sectionKey, strict);
         }
       } catch (error) {
         logger.error(`${sectionKey}: failed to read What's New tab`, { error: error.message });
@@ -100,6 +100,10 @@ export async function scrapeAllSections() {
     const duration = Date.now() - startTime;
     logger.info(`Scraping completed in ${duration}ms, found ${allUpdates.length} publications`, sectionResults);
 
+    if (strict) {
+      const complete = SECTION_KEYS.every(key => Number.isInteger(sectionResults[key]));
+      return { success: complete, items: allUpdates, sectionResults, duration };
+    }
     if (allUpdates.length === 0) {
       return {
         success: false,
@@ -120,13 +124,14 @@ export async function scrapeAllSections() {
     return {
       success: false,
       items: [],
+      ...(strict ? { sectionResults } : {}),
       error: error.message,
       timestamp: new Date().toISOString()
     };
   }
 }
 
-function parsePane($, $pane, sectionKey) {
+function parsePane($, $pane, sectionKey, strict) {
   const updates = [];
   const detectedAt = new Date().toISOString();
 
@@ -134,11 +139,13 @@ function parsePane($, $pane, sectionKey) {
     const $block = $(el);
     const $heading = $block.find('p.sub-heading').first();
     const title = clean($heading.text());
+    if (strict && !title) throw new Error('Unrecognized publication heading');
     if (!title) return;
 
     const metaText = clean($block.find('p.sub-content').first().text());
     const publicationDate = parseDgcaDate(metaText);
     if (!publicationDate) {
+      if (strict) throw new Error('Unrecognized publication date');
       logger.warn(`${sectionKey}: skipped item without a recognisable date`, { title: title.slice(0, 80) });
       return;
     }
@@ -161,7 +168,7 @@ function parsePane($, $pane, sectionKey) {
   return updates;
 }
 
-async function fetchAjaxTab(sectionKey, classification) {
+async function fetchAjaxTab(sectionKey, classification, strict) {
   const url = `${DGCA_BASE_URL}scan?baseLocale=${AJAX_LOCALE}&requestType=ApplicationRH`
     + `&actionVal=viewAllServiceForAJAX&screenId=10000001&classification=${classification}`;
   const data = await fetchWithRetry(url, 'post');
@@ -173,10 +180,12 @@ async function fetchAjaxTab(sectionKey, classification) {
   const updates = [];
   data.contents.forEach((rawTitle, i) => {
     const title = clean(rawTitle);
+    if (strict && !title) throw new Error('Unrecognized publication heading');
     if (!title) return;
 
     const publicationDate = parseDgcaDate(String(data.startDate?.[i] || ''));
     if (!publicationDate) {
+      if (strict) throw new Error('Unrecognized publication date');
       logger.warn(`${sectionKey}: skipped item without a recognisable date`, { title: title.slice(0, 80) });
       return;
     }
@@ -200,7 +209,7 @@ async function fetchAjaxTab(sectionKey, classification) {
 }
 
 // Every publication on a tab's "More" page, current and archived (inArchive: true).
-export async function fetchMoreList(sectionKey) {
+export async function fetchMoreList(sectionKey, { strict = false } = {}) {
   const config = SECTIONS[sectionKey];
   if (!config) throw new Error(`Unknown section ${sectionKey}`);
   const body = new URLSearchParams({
@@ -232,10 +241,14 @@ export async function fetchMoreList(sectionKey) {
   const items = [];
   $('.sub-section').each((_, el) => {
     const $block = $(el);
+    const inArchive = $block.closest('#archiveData').length > 0;
+    if (strict && inArchive) return;
     const title = clean($block.find('.sub-heading').first().text());
+    if (strict && !title) throw new Error('Unrecognized publication heading');
     if (!title) return;
     const metaText = clean($block.find('.sub-content').first().text());
     const publicationDate = parseDgcaDate(metaText);
+    if (strict && !publicationDate) throw new Error('Unrecognized publication date');
     if (!publicationDate) return;
     const attachId = extractAttachId($block.find('.sub-heading a').attr('onclick'))
       || extractAttachId($block.find('a[onclick*="pdfDownload"]').first().attr('onclick'));
@@ -248,7 +261,7 @@ export async function fetchMoreList(sectionKey) {
       pdfUrl: attachId ? `${DGCA_BASE_URL}Upload?flag=iframeAttachView&attachId=${attachId}&baseLocale=en` : '',
       sourcePageUrl: DGCA_BASE_URL,
       detectedAt,
-      inArchive: $block.closest('#archiveData').length > 0
+      inArchive
     });
   });
   if (items.length === 0) throw new Error('no publications found on the "More" page - layout may have changed');

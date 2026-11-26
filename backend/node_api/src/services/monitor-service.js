@@ -17,6 +17,15 @@ const SECTION_LABELS = { tenders: 'Tenders', regulation: 'Regulation', guidance:
 
 const BACKFILL_PER_CYCLE = 12;
 
+export async function claimScheduledMonitoringSlot(slot) {
+  const claim = await getDatabase().query(`
+    INSERT INTO config (key, value) VALUES ('scheduled_monitor_last_slot', $1)
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = dgca_utc_now()
+    WHERE config.value < EXCLUDED.value
+  `, [slot]);
+  return claim.rowCount > 0;
+}
+
 export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) {
   const startTime = Date.now();
   let lock;
@@ -30,12 +39,9 @@ export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) 
         : { success: false, error: 'Monitoring already in progress' };
     }
     if (scheduledSlot) {
-      const claim = await getDatabase().query(`
-        INSERT INTO config (key, value) VALUES ('scheduled_monitor_last_slot', $1)
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = dgca_utc_now()
-        WHERE config.value < EXCLUDED.value
-      `, [scheduledSlot]);
-      if (!claim.rowCount) return { success: true, skipped: true, reason: 'Slot already claimed' };
+      if (!await claimScheduledMonitoringSlot(scheduledSlot)) {
+        return { success: true, skipped: true, reason: 'Slot already claimed' };
+      }
       onScheduledStart?.();
     }
     logger.info('Starting DGCA website monitoring...');
@@ -136,12 +142,14 @@ async function processNewUpdate(update, assertHeld) {
 async function analyze(update, options = {}) {
   const pdfUrl = parseFirstUrl(update.pdf_urls);
   const pdf = await fetchPdfWithText(pdfUrl);
+  options.assertHeld?.();
   await savePdfText(update.id, pdf ? pdf.text : '', pdf ? pdf.pageCount : null);
   const analysis = await analyzePublication(
     { section: update.section, title: update.title, publicationDate: update.publication_date },
     pdf,
     options
   );
+  options.assertHeld?.();
   await saveAnalysis(update.id, analysis);
   if (!options.quiet) logger.info(`Analysed [${analysis.priority.toUpperCase()}] ${update.title.slice(0, 80)} (${analysis.source})`);
   return { pdf, analysis };

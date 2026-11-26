@@ -1,0 +1,58 @@
+name: DGCA production monitoring pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type RUN ONE DGCA PRODUCTION MONITOR PILOT
+        required: true
+        type: string
+      checkpoint:
+        description: SHA-256 of the verified production backup table fingerprints
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dgca-production-monitor
+  cancel-in-progress: false
+
+jobs:
+  production-monitor-only:
+    if: >-
+      github.ref == 'refs/heads/main' && github.run_attempt == '1' &&
+      inputs.confirmation == 'RUN ONE DGCA PRODUCTION MONITOR PILOT' &&
+      vars.DGCA_MONITOR_ENABLED == 'false' && vars.EMAIL_NOTIFICATIONS_ENABLED == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: backend/node_api
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+      - name: Run one approved production monitoring cycle
+        env:
+          PILOT_CONFIRMATION: ${{ inputs.confirmation }}
+          PILOT_CHECKPOINT: ${{ inputs.checkpoint }}
+          DGCA_MONITOR_ENABLED: ${{ vars.DGCA_MONITOR_ENABLED }}
+          EMAIL_NOTIFICATIONS_ENABLED: ${{ vars.EMAIL_NOTIFICATIONS_ENABLED }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PRODUCTION_NEON_HOST: ${{ vars.PRODUCTION_NEON_HOST }}
+          DEPLOYMENT_TEST_NEON_HOST: ${{ vars.DEPLOYMENT_TEST_NEON_HOST }}
+          HOSTED_SMOKE_OPERATOR_USERNAME: ${{ secrets.HOSTED_SMOKE_OPERATOR_USERNAME }}
+          HOSTED_SMOKE_OPERATOR_PASSWORD: ${{ secrets.HOSTED_SMOKE_OPERATOR_PASSWORD }}
+          MONITOR_START_HOUR: ${{ vars.MONITOR_START_HOUR }}
+          MONITOR_END_HOUR: ${{ vars.MONITOR_END_HOUR }}
+          MONITOR_INTERVAL_MINUTES: ${{ vars.MONITOR_INTERVAL_MINUTES }}
+          MONITOR_INTERVAL_HOURS: ${{ vars.MONITOR_INTERVAL_HOURS }}
+          SCRAPER_TIMEOUT_MS: '30000'
+          SCRAPER_RETRY_ATTEMPTS: '2'
+        run: node src/scripts/production-monitor-pilot.js
