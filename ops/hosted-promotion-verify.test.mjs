@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { ORIGIN as STAGED, REVISION, RUN_ID, RUN_AT } from './hosted-preflight.mjs';
-import { approvedMode, LIVE, PROJECT_ID, VERCEL_ID, VERCEL_LOOKUP, readTestRecord, verify } from './hosted-promotion-verify.mjs';
+import { approvedMode, LIVE, PROJECT_ID, VERCEL_ID, VERCEL_ALIAS_LOOKUP, VERCEL_DEPLOYMENT_LOOKUP,
+  readTestRecord, verify, verifyPromotedAlias } from './hosted-promotion-verify.mjs';
 
 const pre = {
   DGCA_VERIFY_MODE: 'pre-promotion', DGCA_VERIFY_CONFIRMATION: 'VERIFY BEFORE DGCA PROMOTION',
@@ -14,8 +15,10 @@ const pre = {
 const post = { ...pre, DGCA_VERIFY_MODE: 'post-promotion', DGCA_VERIFY_CONFIRMATION: 'VERIFY AFTER DGCA PROMOTION',
   VERCEL_PROMOTION_VERIFY_TOKEN: 'synthetic-vercel-token' };
 const run = { id: RUN_ID, run_at: RUN_AT, status: 'success', items_found: 40, items_new: 1, duration_ms: 25324 };
+const assignment = { alias: new URL(LIVE).hostname, projectId: PROJECT_ID, deploymentId: VERCEL_ID,
+  deployment: { id: VERCEL_ID } };
 const deployment = { id: VERCEL_ID, projectId: PROJECT_ID, readyState: 'READY', target: 'production',
-  url: new URL(STAGED).hostname, alias: [new URL(LIVE).hostname], meta: { githubCommitSha: REVISION } };
+  url: new URL(STAGED).hostname, meta: { githubCommitSha: REVISION } };
 const known = async () => run;
 
 function outputs() {
@@ -23,7 +26,7 @@ function outputs() {
   return { items, report: (key, pass) => { items.set(key, pass); return pass; } };
 }
 
-function mockHttp({ alias = deployment, status = { recentRuns: [run], email: { enabled: false } },
+function mockHttp({ alias = assignment, metadata = deployment, status = { recentRuns: [run], email: { enabled: false } },
   oldChallenge = true, oldAuth = true } = {}) {
   const calls = [];
   const send = async (url, options) => {
@@ -31,9 +34,12 @@ function mockHttp({ alias = deployment, status = { recentRuns: [run], email: { e
     assert.equal(options.redirect, 'error');
     calls.push(url);
     const headers = options.headers;
-    if (url === VERCEL_LOOKUP) {
+    if (url === VERCEL_ALIAS_LOOKUP || url === VERCEL_DEPLOYMENT_LOOKUP) {
       assert.deepEqual(headers, { Authorization: `Bearer ${post.VERCEL_PROMOTION_VERIFY_TOKEN}` });
-      return Response.json(alias);
+      const result = url === VERCEL_ALIAS_LOOKUP ? alias : metadata;
+      if (typeof result === 'number') return new Response(null, { status: result,
+        headers: result === 302 ? { location: 'https://unapproved.invalid' } : {} });
+      return Response.json(result);
     }
     const { origin, pathname } = new URL(url);
     assert.ok([LIVE, STAGED].includes(origin));
@@ -92,24 +98,60 @@ test('reports a wrong staged record or enabled email as failures', async () => {
   assert.equal(items.get('staged-effective-email-disabled'), false);
 });
 
-test('post-promotion verifies the exact management API alias before accessing the live site', async () => {
+test('post-promotion checks assignment and metadata by ID before accessing the live site, without an alias array', async () => {
   const { items, report } = outputs();
   const { calls, send } = mockHttp();
   await verify(post, report, send, known);
-  assert.deepEqual(calls, [VERCEL_LOOKUP, `${LIVE}/`, `${LIVE}/api/health`, `${LIVE}/api/health`, `${LIVE}/api/monitor/status`]);
+  assert.deepEqual(calls, [VERCEL_ALIAS_LOOKUP, VERCEL_DEPLOYMENT_LOOKUP,
+    `${LIVE}/`, `${LIVE}/api/health`, `${LIVE}/api/health`, `${LIVE}/api/monitor/status`]);
   assert.ok([...items.values()].every(Boolean));
 });
 
-test('missing or mismatched Vercel alias evidence blocks post-promotion application requests', async () => {
-  for (const [env, alias, expected] of [[{ ...post, VERCEL_PROMOTION_VERIFY_TOKEN: '' }, deployment, []],
-    [post, { ...deployment, id: 'dpl_wrong' }, [VERCEL_LOOKUP]],
-    [post, { ...deployment, alias: [] }, [VERCEL_LOOKUP]],
-    [post, { ...deployment, gitSource: { sha: 'wrong-sha' } }, [VERCEL_LOOKUP]]]) {
+test('missing, mismatched, unauthorized, or redirected alias evidence blocks all later requests', async () => {
+  for (const [env, alias, expected] of [[{ ...post, VERCEL_PROMOTION_VERIFY_TOKEN: '' }, assignment, []],
+    [post, { ...assignment, deploymentId: 'dpl_wrong', deployment: { id: 'dpl_wrong' } }, [VERCEL_ALIAS_LOOKUP]],
+    [post, { ...assignment, deployment: { id: 'dpl_wrong' } }, [VERCEL_ALIAS_LOOKUP]],
+    [post, { ...assignment, projectId: 'prj_wrong' }, [VERCEL_ALIAS_LOOKUP]],
+    [post, {}, [VERCEL_ALIAS_LOOKUP]], [post, 401, [VERCEL_ALIAS_LOOKUP]], [post, 302, [VERCEL_ALIAS_LOOKUP]]]) {
     const { items, report } = outputs();
     const { calls, send } = mockHttp({ alias });
     await verify(env, report, send, async () => assert.fail('must not reach Neon'));
     assert.deepEqual(calls, expected);
     assert.equal(items.get('vercel-live-alias'), false);
+  }
+});
+
+test('retry is limited to missing alias reads and the known rollback assignment', async () => {
+  const previous = 'dpl_3XBf8V7i3ajWQfcXn82eMWeQPsbR';
+  const old = { ...assignment, deploymentId: previous, deployment: { id: previous } };
+  for (const [sequence, pass, expectedWaits] of [[[404, old, { ...assignment, deployment: undefined }], true, [2000, 2000]],
+    [[old, old, old], false, [2000, 2000]], [[403], false, []], [[302], false, []],
+    [[{ ...old, deployment: { id: VERCEL_ID } }], false, []]]) {
+    const waits = [];
+    let reads = 0;
+    const send = async (url, options) => {
+      assert.equal(url, VERCEL_ALIAS_LOOKUP);
+      assert.equal(options.redirect, 'error');
+      const value = sequence[reads++];
+      return typeof value === 'number' ? new Response(null, { status: value }) : Response.json(value);
+    };
+    assert.equal(await verifyPromotedAlias(post.VERCEL_PROMOTION_VERIFY_TOKEN, send, async ms => waits.push(ms)), pass);
+    assert.deepEqual(waits, expectedWaits);
+    assert.equal(reads, sequence.length);
+  }
+});
+
+test('deployment metadata is checked once and fails closed on missing, conflicting, redirected, or denied responses', async () => {
+  const invalid = [404, 403, 302, { ...deployment, id: 'dpl_wrong' }, { ...deployment, projectId: 'prj_wrong' },
+    { ...deployment, readyState: 'BUILDING' }, { ...deployment, target: 'preview' }, { ...deployment, url: 'wrong.vercel.app' },
+    { ...deployment, meta: {} }, { ...deployment, gitSource: { sha: 'wrong-sha' } }];
+  for (const metadata of invalid) {
+    const { items, report } = outputs();
+    const { calls, send } = mockHttp({ metadata });
+    await verify(post, report, send, async () => assert.fail('must not reach Neon'));
+    assert.deepEqual(calls, [VERCEL_ALIAS_LOOKUP, VERCEL_DEPLOYMENT_LOOKUP]);
+    assert.equal(items.get('vercel-live-alias'), true);
+    assert.equal(items.get('vercel-deployment-metadata'), false);
   }
 });
 

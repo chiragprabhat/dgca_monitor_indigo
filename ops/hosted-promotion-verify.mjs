@@ -1,13 +1,19 @@
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { ORIGIN as STAGED, REVISION, RUN_ID, RUN_AT, verifySocket } from './hosted-preflight.mjs';
 
 export const LIVE = 'https://dgcamonitorindigo.vercel.app';
 export const VERCEL_ID = 'dpl_2mbrh9ziDgj8TWoYoRKbcURe5TKS';
-export const VERCEL_LOOKUP = 'https://api.vercel.com/v13/deployments/dgcamonitorindigo.vercel.app?teamId=team_51PJEt40i5ajIYE1xqzR8FzQ';
 export const PROJECT_ID = 'prj_VgGmlwyx1g3XJbwPQ668D7c7q6Eq';
+const VERCEL_API = 'https://api.vercel.com';
+const TEAM_SCOPE = 'teamId=team_51PJEt40i5ajIYE1xqzR8FzQ';
+const LIVE_DOMAIN = new URL(LIVE).hostname;
+const ROLLBACK_ID = 'dpl_3XBf8V7i3ajWQfcXn82eMWeQPsbR';
+export const VERCEL_ALIAS_LOOKUP = `${VERCEL_API}/v4/aliases/${LIVE_DOMAIN}?${TEAM_SCOPE}`;
+export const VERCEL_DEPLOYMENT_LOOKUP = `${VERCEL_API}/v13/deployments/${VERCEL_ID}?${TEAM_SCOPE}`;
 const PHRASES = new Map([
   ['pre-promotion', 'VERIFY BEFORE DGCA PROMOTION'],
   ['post-promotion', 'VERIFY AFTER DGCA PROMOTION']
@@ -27,22 +33,44 @@ export function approvedMode(env) {
   return mode;
 }
 
-function get(send, url, headers = {}) {
-  return send(url, { method: 'GET', redirect: 'error', cache: 'no-store', headers, signal: AbortSignal.timeout(20000) });
+function get(send, url, headers = {}, timeout = 20000) {
+  return send(url, { method: 'GET', redirect: 'error', cache: 'no-store', headers, signal: AbortSignal.timeout(timeout) });
 }
 
-export async function verifyPromotedAlias(token, send = fetch) {
-  if (!token) return false;
-  const response = await get(send, VERCEL_LOOKUP, { Authorization: `Bearer ${token}` });
+async function readVercel(token, endpoint, send) {
+  const response = await get(send, endpoint, { Authorization: `Bearer ${token}` }, 6000);
   if (response.status !== 200) {
     await response.body?.cancel();
-    return false;
+    return { status: response.status };
   }
-  const deployment = await response.json();
-  const sources = [deployment?.gitSource?.sha, deployment?.meta?.githubCommitSha, deployment?.meta?.gitCommitSha].filter(Boolean);
+  return { status: response.status, body: await response.json() };
+}
+
+export async function verifyPromotedAlias(token, send = fetch, wait = sleep) {
+  if (!token) return false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { status, body } = await readVercel(token, VERCEL_ALIAS_LOOKUP, send);
+    if (status === 200) {
+      if (body?.alias !== LIVE_DOMAIN || body.projectId !== PROJECT_ID || body.deletedAt != null ||
+          body.redirect != null || body.redirectStatusCode != null ||
+          (body.deployment?.id !== undefined && body.deployment.id !== body.deploymentId)) return false;
+      if (body.deploymentId === VERCEL_ID) return true;
+      if (body.deploymentId !== ROLLBACK_ID) return false;
+    } else if (status !== 404) {
+      return false;
+    }
+    // Only a missing alias or the known previous assignment can still be propagating.
+    if (attempt < 2) await wait(2000);
+  }
+  return false;
+}
+
+async function verifyPromotedDeployment(token, send) {
+  const { body: deployment } = await readVercel(token, VERCEL_DEPLOYMENT_LOOKUP, send);
+  const sources = [deployment?.gitSource?.sha, deployment?.meta?.githubCommitSha, deployment?.meta?.gitCommitSha]
+    .filter(sha => sha != null);
   return deployment?.id === VERCEL_ID && deployment.projectId === PROJECT_ID && deployment.readyState === 'READY' &&
     deployment.target === 'production' && deployment.url === new URL(STAGED).hostname &&
-    Array.isArray(deployment.alias) && deployment.alias.includes(new URL(LIVE).hostname) &&
     sources.length > 0 && sources.every(sha => sha === REVISION);
 }
 
@@ -128,6 +156,8 @@ export async function verify(env, report, send = fetch, readDirect = readDeploym
         return;
       }
       if (!report(stage, await verifyPromotedAlias(env.VERCEL_PROMOTION_VERIFY_TOKEN, send))) return;
+      stage = 'vercel-deployment-metadata';
+      if (!report(stage, await verifyPromotedDeployment(env.VERCEL_PROMOTION_VERIFY_TOKEN, send))) return;
     }
     if (mode === 'pre-promotion') {
       stage = 'previous-live-http';
