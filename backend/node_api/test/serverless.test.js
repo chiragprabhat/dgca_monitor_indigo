@@ -47,7 +47,7 @@ test('Vercel handler and direct worker share durable, authenticated PostgreSQL o
     VERCEL: '1', DATABASE_URL: url.toString(), FRONTEND_URL: origin, API_OPERATOR_USERNAME: 'operator',
     API_OPERATOR_PASSWORD: password, SUMMARY_PROVIDER: 'basic', EMAIL_NOTIFICATIONS_ENABLED: 'false',
     USE_WINDOWS_CERTS: 'false', MONITOR_START_HOUR: '0', MONITOR_END_HOUR: '23',
-    MONITOR_INTERVAL_MINUTES: '15', DGCA_ACTIONS_WORKER: '1', DGCA_MONITOR_ENABLED: 'true'
+    MONITOR_INTERVAL_MINUTES: '30', DGCA_ACTIONS_WORKER: '1', DGCA_MONITOR_ENABLED: 'true'
   });
   const { initializeDatabase, closeDatabase, getDatabase } = await import('../src/config/database.js');
   t.after(async () => {

@@ -62,11 +62,45 @@ function portal(t) {
 
 test('recurring workflow uses a second email gate on both SMTP secrets and preserves its schedule', async () => {
   const yaml = await readFile(new URL('../../../.github/workflows/dgca-monitor.yml', import.meta.url), 'utf8');
-  assert.match(yaml, /cron: '0,15,30,45 \* \* \* \*'/);
+  assert.match(yaml, /cron: '7,37 \* \* \* \*'/);
   assert.match(yaml, /timeout-minutes: 14/);
   for (const secret of ['EMAIL_APP_PASSWORD', 'SMTP_PASSWORD']) {
     assert.ok(yaml.includes(secret + ": ${{ vars.EMAIL_NOTIFICATIONS_ENABLED == 'true' && secrets." + secret + " || '' }}"));
   }
+});
+
+test('shifted 30-minute triggers match durable UTC slots across IST and UTC boundaries', {
+  skip: !fixtureUrl
+}, async t => {
+  const { db } = await fixture(t);
+  Object.assign(process.env, { MONITOR_INTERVAL_MINUTES: '30', MONITOR_START_HOUR: '0', MONITOR_END_HOUR: '23' });
+  const { getGitHubMonitoringSlot, getSchedulerStatus } = await import('../src/services/scheduler-service.js');
+  const { claimScheduledMonitoringSlot } = await import('../src/services/monitor-service.js');
+  const slot = time => getGitHubMonitoringSlot(new Date(time));
+  const boundary = 30 * 60 * 1000;
+  const start = Date.parse('2026-11-25T00:00:00Z');
+  assert.equal((await getSchedulerStatus()).intervalMinutes, 30);
+  // The saved setting takes precedence over the GitHub environment default.
+  await db.query("INSERT INTO config (key,value) VALUES ('intervalMinutes','30')");
+  process.env.MONITOR_INTERVAL_MINUTES = '15';
+  for (let index = 0; index < 96; index++) {
+    const expected = start + index * boundary;
+    assert.equal(await slot(expected + 7 * 60 * 1000), new Date(expected).toISOString());
+  }
+  assert.equal((await getSchedulerStatus()).intervalMinutes, 30);
+  assert.equal(await slot('2026-11-26T18:29:59.999Z'), '2026-11-26T18:00:00.000Z');
+  const istMidnight = await slot('2026-11-26T18:37:00.000Z');
+  const utcMidnight = await slot('2026-11-27T00:07:00.000Z');
+  assert.equal(istMidnight, '2026-11-26T18:30:00.000Z');
+  assert.equal(utcMidnight, '2026-11-27T00:00:00.000Z');
+  const claims = await Promise.all([claimScheduledMonitoringSlot(istMidnight), claimScheduledMonitoringSlot(istMidnight)]);
+  assert.equal(claims.filter(Boolean).length, 1);
+  assert.equal(await claimScheduledMonitoringSlot(utcMidnight), true);
+  assert.equal(await claimScheduledMonitoringSlot(istMidnight), false);
+  process.env.MONITOR_END_HOUR = '0';
+  assert.equal(await slot('2026-11-26T18:07:00.000Z'), null);
+  assert.equal(await slot('2026-11-26T18:37:00.000Z'), istMidnight);
+  assert.equal(await slot('2026-11-26T19:37:00.000Z'), null);
 });
 
 test('recurring monitor verifies each section, preserves existing duplicates, and keeps interrupted slots claimed', {
