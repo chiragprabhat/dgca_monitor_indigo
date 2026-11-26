@@ -1,0 +1,55 @@
+name: DGCA hosted read-only preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type RUN HOSTED READ ONLY PREFLIGHT
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dgca-hosted-job-smoke
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.DGCA_MONITOR_ENABLED == 'false' &&
+      vars.EMAIL_NOTIFICATIONS_ENABLED == 'false' &&
+      inputs.confirmation == 'RUN HOSTED READ ONLY PREFLIGHT'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: 88d059b531993cd34e05bbf90339faf235c4b356
+          path: pinned-app
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+        working-directory: pinned-app/backend/node_api
+      - name: Read the approved monitoring record and verify hosted settings
+        env:
+          HOSTED_PREFLIGHT_CONFIRMATION: ${{ inputs.confirmation }}
+          DGCA_MONITOR_ENABLED: ${{ vars.DGCA_MONITOR_ENABLED }}
+          EMAIL_NOTIFICATIONS_ENABLED: ${{ vars.EMAIL_NOTIFICATIONS_ENABLED }}
+          HOSTED_SMOKE_URL: ${{ vars.HOSTED_SMOKE_URL }}
+          HOSTED_SMOKE_TEST_RUN_ID: ${{ vars.HOSTED_SMOKE_TEST_RUN_ID }}
+          HOSTED_SMOKE_TEST_RUN_AT: ${{ vars.HOSTED_SMOKE_TEST_RUN_AT }}
+          HOSTED_SMOKE_OPERATOR_USERNAME: ${{ secrets.HOSTED_SMOKE_OPERATOR_USERNAME }}
+          HOSTED_SMOKE_OPERATOR_PASSWORD: ${{ secrets.HOSTED_SMOKE_OPERATOR_PASSWORD }}
+          HOSTED_SMOKE_VERCEL_BYPASS: ${{ secrets.HOSTED_SMOKE_VERCEL_BYPASS }}
+          DEPLOYMENT_TEST_DATABASE_URL: ${{ secrets.DEPLOYMENT_TEST_DATABASE_URL }}
+          DEPLOYMENT_TEST_NEON_HOST: ${{ vars.DEPLOYMENT_TEST_NEON_HOST }}
+          PRODUCTION_NEON_HOST: ${{ vars.PRODUCTION_NEON_HOST }}
+        run: node ops/hosted-preflight.mjs
