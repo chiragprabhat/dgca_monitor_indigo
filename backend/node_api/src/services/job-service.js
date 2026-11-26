@@ -41,7 +41,7 @@ export async function recoverJobs() {
     // The caller holds the worker session lock, so any running rows belong to a stopped runner.
     await db.query(`
       UPDATE dgca_jobs SET state = 'queued'
-      WHERE state = 'running' AND kind IN ('car', 'archive', 'archive-analysis', 'compare', 'revision', 'upload', 'smtp-check')
+      WHERE state = 'running' AND kind IN ('car', 'archive', 'archive-analysis', 'compare', 'revision', 'upload')
     `);
     await db.query(`
       UPDATE dgca_jobs SET state = 'failed', finished_at = now(), status = 503,

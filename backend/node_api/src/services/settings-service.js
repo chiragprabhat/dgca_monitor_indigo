@@ -16,7 +16,8 @@ function envDefaults() {
   const recipients = (process.env.EMAIL_RECIPIENTS || process.env.EMAIL_RECIPIENT || process.env.EMAIL_FROM || '')
     .split(/[,;]/).map(s => s.trim()).filter(Boolean);
   return {
-    emailEnabled: process.env.EMAIL_NOTIFICATIONS_ENABLED === 'true',
+    // The worker requires a saved opt-in in addition to the GitHub email gate.
+    emailEnabled: process.env.DGCA_ACTIONS_WORKER !== '1' && process.env.EMAIL_NOTIFICATIONS_ENABLED === 'true',
     recipients,
     sameDayOnly: process.env.EMAIL_SAME_DAY_ONLY !== 'false',
     categories: [...CATEGORIES],

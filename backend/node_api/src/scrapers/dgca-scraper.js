@@ -52,7 +52,7 @@ async function fetchWithRetry(url, method = 'get', attempt = 1) {
 
 export async function scrapeAllSections({ strict = false } = {}) {
   const startTime = Date.now();
-  const sectionResults = {};
+  const sectionResults = strict ? Object.fromEntries(SECTION_KEYS.map(key => [key, 'unverified'])) : {};
 
   try {
     const html = await fetchWithRetry(DGCA_BASE_URL);
@@ -101,8 +101,11 @@ export async function scrapeAllSections({ strict = false } = {}) {
     logger.info(`Scraping completed in ${duration}ms, found ${allUpdates.length} publications`, sectionResults);
 
     if (strict) {
-      const complete = SECTION_KEYS.every(key => Number.isInteger(sectionResults[key]));
-      return { success: complete, items: allUpdates, sectionResults, duration };
+      const failed = SECTION_KEYS.filter(key => !Number.isSafeInteger(sectionResults[key]) || sectionResults[key] < 0);
+      return {
+        success: failed.length === 0, items: allUpdates, sectionResults, duration,
+        ...(failed.length ? { error: 'DGCA sections incomplete: ' + failed.map(key => key + ' (' + sectionResults[key] + ')').join(', ') } : {})
+      };
     }
     if (allUpdates.length === 0) {
       return {
@@ -125,7 +128,7 @@ export async function scrapeAllSections({ strict = false } = {}) {
       success: false,
       items: [],
       ...(strict ? { sectionResults } : {}),
-      error: error.message,
+      error: strict ? 'Could not verify any DGCA section' : error.message,
       timestamp: new Date().toISOString()
     };
   }
@@ -134,8 +137,15 @@ export async function scrapeAllSections({ strict = false } = {}) {
 function parsePane($, $pane, sectionKey, strict) {
   const updates = [];
   const detectedAt = new Date().toISOString();
+  const blocks = $pane.find('.sub-section');
+  if (strict && blocks.length === 0) {
+    const content = clean($pane.text());
+    if (content && !/^(?:no (?:records?|data|publications?|notices?) (?:found|available)|no records to display)[.!]?$/i.test(content)) {
+      throw new Error('Unrecognized publication list');
+    }
+  }
 
-  $pane.find('.sub-section').each((_, el) => {
+  blocks.each((_, el) => {
     const $block = $(el);
     const $heading = $block.find('p.sub-heading').first();
     const title = clean($heading.text());

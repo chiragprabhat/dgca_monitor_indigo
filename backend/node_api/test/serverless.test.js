@@ -63,6 +63,7 @@ test('Vercel handler and direct worker share durable, authenticated PostgreSQL o
   const { default: handler } = await import('../../../api/dgca.mjs');
   const { runActionsWorker } = await import('../src/services/actions-worker.js');
   const { enqueueJob, claimJob } = await import('../src/services/job-service.js');
+  const { storeUpload } = await import('../src/services/upload-service.js');
   const runWorker = async date => {
     delete process.env.VERCEL;
     try { return await runActionsWorker(date); } finally { process.env.VERCEL = '1'; }
@@ -107,25 +108,38 @@ test('Vercel handler and direct worker share durable, authenticated PostgreSQL o
   assert.equal((await request(`/jobs/${upload.jobId}`, { headers: { Authorization: '' } })).status, 401);
 
   let scrapes = 0;
+  let carReads = 0;
   let archiving = false;
   axios.request = async () => {
     scrapes++;
     return { data: '<html></html>' };
   };
-  axios.post = async (_url, body) => ({
-    data: body.includes('fetchRulebookContentDtlsList')
-      ? '<table><tr><td colspan="5">SERIES A Test</td></tr><tr><td><a data-url="dynamicPdf/car-test">PART I</a></td><td>Issue 1</td><td>Crew Rest</td><td></td><td></td></tr></table>'
-      : archiving
+  axios.post = async (_url, body) => {
+    if (body.includes('fetchRulebookContentDtlsList')) {
+      carReads++;
+      return { data: '<table><tr><td colspan="5">SERIES A Test</td></tr><tr><td><a data-url="dynamicPdf/car-test">PART I</a></td><td>Issue 1</td><td>Crew Rest</td><td></td><td></td></tr></table>' };
+    }
+    return { data: archiving
         ? '<div id="archiveData"><div class="sub-section"><p class="sub-heading">Archived Crew Fixture</p><p class="sub-content">10/10/2025</p></div></div>'
         : '<div class="sub-section"><p class="sub-heading">Crew Rest Fixture</p><p class="sub-content">23/11/2026</p></div>'
-  });
+    };
+  };
   axios.get = async () => ({ data: pdf, headers: { 'content-type': 'application/pdf' } });
   const interrupted = await enqueueJob('test-email');
   await db.query("UPDATE dgca_jobs SET state = 'running' WHERE id = $1", [interrupted.id]);
+  const interruptedSmtp = await enqueueJob('smtp-check');
+  await db.query("UPDATE dgca_jobs SET state = 'running' WHERE id = $1", [interruptedSmtp.id]);
+  const expired = await enqueueJob('compare', { expired: true });
+  await db.query("UPDATE dgca_jobs SET created_at = now() - interval '2 days' WHERE id = $1", [expired.id]);
+  // The previous runner stored the document before it was stopped and could not finish the job.
+  const storedBeforeStop = await storeUpload(pdf, 'fixture.pdf');
+  await db.query("UPDATE dgca_jobs SET state = 'running' WHERE id = $1", [upload.jobId]);
   const date = new Date();
   const { monitoring } = await runWorker(date);
   assert.ok(monitoring.success);
+  assert.equal(carReads, 1, 'the first run refreshes CARs with no prior job');
   assert.equal(scrapes, 1);
+  assert.equal(carReads, 1, 'a fresh CAR result does not enqueue another refresh');
   assert.ok((await runWorker(date)).monitoring.skipped);
   assert.equal(scrapes, 1);
   const uploaded = await (await request(`/jobs/${upload.jobId}`)).json();
@@ -133,8 +147,13 @@ test('Vercel handler and direct worker share durable, authenticated PostgreSQL o
   const file = JSON.parse(uploaded.chunk);
   assert.equal(file.sizeBytes, 40 * 1024 * 1024);
   assert.equal(file.hasText, true);
+  assert.equal(file.id, storedBeforeStop.id);
+  assert.equal(file.duplicate, true);
+  assert.equal((await db.prepare('SELECT count(*) AS n FROM uploaded_documents').get()).n, 1);
   assert.equal((await db.prepare('SELECT count(*) AS n FROM dgca_upload_chunks').get()).n, 0);
   assert.equal((await request(`/jobs/${interrupted.id}`).then(r => r.json())).status, 503);
+  assert.equal((await request(`/jobs/${interruptedSmtp.id}`).then(r => r.json())).status, 503);
+  assert.equal((await request(`/jobs/${expired.id}`).then(r => r.json())).status, 410);
 
   const { cars: [car] } = await (await request('/cars')).json();
   assert.ok(car.has_text);
@@ -150,6 +169,7 @@ test('Vercel handler and direct worker share durable, authenticated PostgreSQL o
     SELECT id, 'amended', 'Amended fixture', $1, pdf_url FROM car_documents WHERE id = $2`, [previous.id, car.id]);
   assert.equal((await request('/cars/sync', { method: 'POST' })).status, 202);
   await runWorker(date);
+  assert.equal(carReads, 2, 'the queued manual refresh ran once');
   const result = await request(`/jobs/${jobId}`).then(r => r.json());
   assert.equal(JSON.parse(result.chunk).right.section, 'car');
   const archive = await request('/archive/status').then(r => r.json());
@@ -160,6 +180,9 @@ test('Vercel handler and direct worker share durable, authenticated PostgreSQL o
   const { changes: [amended] } = await request('/cars').then(r => r.json());
   assert.match(amended.detail, /sentences added/);
   assert.ok(!Object.hasOwn(amended, 'previous_history_id'));
+  archiving = false;
+  await runWorker(new Date(Date.now() + 61 * 60000));
+  assert.equal(carReads, 3, 'the worker refreshes CARs after the hourly interval');
 
   const large = 'x'.repeat(3 * 1024 * 1024);
   await db.query('UPDATE updates SET summary = $1 WHERE id = (SELECT id FROM updates LIMIT 1)', [large]);

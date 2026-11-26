@@ -29,6 +29,7 @@ export async function claimScheduledMonitoringSlot(slot) {
 export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) {
   const startTime = Date.now();
   let lock;
+  let sectionResults;
 
   try {
     lock = await acquireMonitoringLock();
@@ -47,18 +48,20 @@ export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) 
     logger.info('Starting DGCA website monitoring...');
     await initializeEmailService();
 
-    const scrapeResult = await scrapeAllSections();
+    const strict = process.env.DGCA_ACTIONS_WORKER === '1';
+    const scrapeResult = await scrapeAllSections({ strict });
+    sectionResults = scrapeResult.sectionResults;
     lock.assertHeld();
     if (!scrapeResult.success) {
       logger.error('Scraping failed', { error: scrapeResult.error });
       await logMonitoringRun('failed', 0, 0, Date.now() - startTime, scrapeResult.error);
-      return { success: false, error: scrapeResult.error };
+      return { success: false, error: scrapeResult.error, ...(sectionResults && { sectionResults }) };
     }
 
     const newIds = [];
     for (const item of scrapeResult.items) {
       lock.assertHeld();
-      const result = await saveUpdate(item);
+      const result = await saveUpdate(item, { preserveExisting: strict });
       if (result.isNew) newIds.push(result.id);
     }
     logger.info(`Scraped ${scrapeResult.items.length} items, ${newIds.length} new`);
@@ -70,7 +73,7 @@ export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) 
     for (const update of pending) {
       lock.assertHeld();
       try {
-        if (await processNewUpdate(update, lock.assertHeld)) notificationsSent++;
+        if (await processNewUpdate(update, lock.assertHeld, strict)) notificationsSent++;
       } catch (error) {
         logger.warn('Processing failed, will retry next cycle', { id: update.id, error: error.message });
       }
@@ -88,21 +91,22 @@ export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) 
       itemsFound: scrapeResult.items.length,
       newItems: newIds.length,
       notificationsSent,
-      duration
+      duration,
+      ...(sectionResults && { sectionResults })
     };
   } catch (error) {
     const duration = Date.now() - startTime;
     logger.error('Monitoring cycle failed:', { error: error.message });
     await logMonitoringRun('failed', 0, 0, duration, error.message);
-    return { success: false, error: error.message, duration };
+    return { success: false, error: error.message, duration, ...(sectionResults && { sectionResults }) };
   } finally {
     await lock?.release();
   }
 }
 
 // Analyses one newly detected publication and emails it if it was published today. Returns true if emailed.
-async function processNewUpdate(update, assertHeld) {
-  const { pdf, analysis } = await analyze(update);
+async function processNewUpdate(update, assertHeld, strict) {
+  const { pdf, analysis } = await analyze(update, strict ? { assertHeld } : undefined);
   const title = update.title.slice(0, 80);
   const stored = await getDatabase().prepare('SELECT * FROM updates WHERE id = $1').get(update.id);
   const revision = await compareWithPrevious(stored);

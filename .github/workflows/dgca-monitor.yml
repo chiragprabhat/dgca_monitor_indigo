@@ -45,13 +45,13 @@ jobs:
           EMAIL_FROM: ${{ vars.EMAIL_FROM }}
           EMAIL_FROM_NAME: ${{ vars.EMAIL_FROM_NAME }}
           EMAIL_RECIPIENTS: ${{ vars.EMAIL_RECIPIENTS }}
-          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_APP_PASSWORD: ${{ vars.EMAIL_NOTIFICATIONS_ENABLED == 'true' && secrets.EMAIL_APP_PASSWORD || '' }}
           EMAIL_MAX_ATTACHMENT_MB: ${{ vars.EMAIL_MAX_ATTACHMENT_MB }}
           SMTP_HOST: ${{ vars.SMTP_HOST }}
           SMTP_PORT: ${{ vars.SMTP_PORT }}
           SMTP_SECURE: ${{ vars.SMTP_SECURE }}
           SMTP_USER: ${{ vars.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_PASSWORD: ${{ vars.EMAIL_NOTIFICATIONS_ENABLED == 'true' && secrets.SMTP_PASSWORD || '' }}
           SCRAPER_TIMEOUT_MS: ${{ vars.SCRAPER_TIMEOUT_MS }}
           SCRAPER_RETRY_ATTEMPTS: ${{ vars.SCRAPER_RETRY_ATTEMPTS }}
           LOG_LEVEL: warn

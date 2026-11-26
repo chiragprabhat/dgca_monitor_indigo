@@ -43,7 +43,10 @@ const PRIORITY_STYLE = {
 
 export async function isEmailEnabled() {
   if (monitoringSmokeTest()) return false;
-  return (await getSettings()).emailEnabled;
+  const worker = process.env.DGCA_ACTIONS_WORKER === '1';
+  if (worker && process.env.EMAIL_NOTIFICATIONS_ENABLED !== 'true') return false;
+  const { emailEnabled } = await getSettings();
+  return worker ? emailEnabled === true : emailEnabled;
 }
 
 export async function getRecipients() {
@@ -411,6 +414,9 @@ export async function getNotificationHistory(limit = 20) {
 
 export async function testEmailConnection() {
   if (monitoringSmokeTest()) return { success: false, error: 'Email disabled for monitoring smoke test' };
+  if (process.env.DGCA_ACTIONS_WORKER === '1' && !await isEmailEnabled()) {
+    return { success: false, error: 'Email notifications disabled' };
+  }
   if (!transporter) transporter = await initializeEmailService();
   if (!transporter) return { success: false, error: await isEmailEnabled() ? 'Email service not configured' : 'Email notifications disabled' };
   try {
