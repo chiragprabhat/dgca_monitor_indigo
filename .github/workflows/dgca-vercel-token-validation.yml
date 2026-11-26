@@ -1,0 +1,61 @@
+name: DGCA Vercel token validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type VALIDATE DGCA VERCEL TOKEN
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: dgca-hosted-job-smoke
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.DGCA_MONITOR_ENABLED == 'false' &&
+      vars.EMAIL_NOTIFICATIONS_ENABLED == 'false' &&
+      inputs.confirmation == 'VALIDATE DGCA VERCEL TOKEN'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Verify the existing live assignment with the Vercel API
+        shell: bash
+        env:
+          DGCA_CONFIRMATION: ${{ inputs.confirmation }}
+          DGCA_MONITOR_ENABLED: ${{ vars.DGCA_MONITOR_ENABLED }}
+          EMAIL_NOTIFICATIONS_ENABLED: ${{ vars.EMAIL_NOTIFICATIONS_ENABLED }}
+          VERCEL_PROMOTION_VERIFY_TOKEN: ${{ secrets.VERCEL_PROMOTION_VERIFY_TOKEN }}
+        run: |
+          node --input-type=module <<'NODE'
+          const url = 'https://api.vercel.com/v13/deployments/dgcamonitorindigo.vercel.app?teamId=team_51PJEt40i5ajIYE1xqzR8FzQ';
+          const env = process.env;
+          let pass = false;
+          try {
+            if (env.DGCA_CONFIRMATION === 'VALIDATE DGCA VERCEL TOKEN' &&
+                env.DGCA_MONITOR_ENABLED === 'false' && env.EMAIL_NOTIFICATIONS_ENABLED === 'false' &&
+                env.VERCEL_PROMOTION_VERIFY_TOKEN && env.NODE_TLS_REJECT_UNAUTHORIZED !== '0') {
+              const response = await fetch(url, { method: 'GET', redirect: 'error', cache: 'no-store',
+                headers: { Authorization: `Bearer ${env.VERCEL_PROMOTION_VERIFY_TOKEN}` },
+                signal: AbortSignal.timeout(15000) });
+              if (response.status === 200) {
+                const deployment = await response.json();
+                pass = deployment?.id === 'dpl_3XBf8V7i3ajWQfcXn82eMWeQPsbR' &&
+                  deployment.projectId === 'prj_VgGmlwyx1g3XJbwPQ668D7c7q6Eq' && deployment.readyState === 'READY' &&
+                  deployment.target === 'production' && Array.isArray(deployment.alias) &&
+                  deployment.alias.includes('dgcamonitorindigo.vercel.app');
+              } else {
+                await response.body?.cancel();
+              }
+            }
+          } catch {
+            pass = false;
+          }
+          console.log(JSON.stringify({ check: 'vercel-token-live-rollback-target', outcome: pass ? 'PASS' : 'FAIL' }));
+          process.exitCode = pass ? 0 : 1;
+          NODE
