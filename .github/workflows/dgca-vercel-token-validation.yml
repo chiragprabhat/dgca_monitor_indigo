@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type VALIDATE DGCA VERCEL TOKEN
+        description: Type VERIFY DGCA VERCEL ALIAS
         required: true
         type: string
 
@@ -20,11 +20,11 @@ jobs:
       github.ref == 'refs/heads/main' &&
       vars.DGCA_MONITOR_ENABLED == 'false' &&
       vars.EMAIL_NOTIFICATIONS_ENABLED == 'false' &&
-      inputs.confirmation == 'VALIDATE DGCA VERCEL TOKEN'
+      inputs.confirmation == 'VERIFY DGCA VERCEL ALIAS'
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - name: Verify the existing live assignment with the Vercel API
+      - name: Check the rollback alias and deployment metadata separately
         shell: bash
         env:
           DGCA_CONFIRMATION: ${{ inputs.confirmation }}
@@ -33,29 +33,89 @@ jobs:
           VERCEL_PROMOTION_VERIFY_TOKEN: ${{ secrets.VERCEL_PROMOTION_VERIFY_TOKEN }}
         run: |
           node --input-type=module <<'NODE'
-          const url = 'https://api.vercel.com/v13/deployments/dgcamonitorindigo.vercel.app?teamId=team_51PJEt40i5ajIYE1xqzR8FzQ';
+          const api = 'https://api.vercel.com';
+          const team = 'team_51PJEt40i5ajIYE1xqzR8FzQ';
+          const project = 'prj_VgGmlwyx1g3XJbwPQ668D7c7q6Eq';
+          const domain = 'dgcamonitorindigo.vercel.app';
+          const rollback = 'dpl_3XBf8V7i3ajWQfcXn82eMWeQPsbR';
+          const rollbackHost = 'dgcamonitorindigo-dpm2srkax-chirag-prabhats-projects.vercel.app';
+          const revision = 'dc112a79efe4d2113a8c4ef1a1a1b440702d5379';
           const env = process.env;
-          let pass = false;
-          try {
-            if (env.DGCA_CONFIRMATION === 'VALIDATE DGCA VERCEL TOKEN' &&
-                env.DGCA_MONITOR_ENABLED === 'false' && env.EMAIL_NOTIFICATIONS_ENABLED === 'false' &&
-                env.VERCEL_PROMOTION_VERIFY_TOKEN && env.NODE_TLS_REJECT_UNAUTHORIZED !== '0') {
-              const response = await fetch(url, { method: 'GET', redirect: 'error', cache: 'no-store',
+          const report = (check, result) => console.log(JSON.stringify({ check, ...result }));
+          const pass = { outcome: 'PASS' };
+          const fail = reason => ({ outcome: 'FAIL', reason });
+
+          async function read(path, missing) {
+            let response;
+            try {
+              response = await fetch(`${api}${path}?teamId=${team}`, { method: 'GET', redirect: 'manual', cache: 'no-store',
                 headers: { Authorization: `Bearer ${env.VERCEL_PROMOTION_VERIFY_TOKEN}` },
-                signal: AbortSignal.timeout(15000) });
-              if (response.status === 200) {
-                const deployment = await response.json();
-                pass = deployment?.id === 'dpl_3XBf8V7i3ajWQfcXn82eMWeQPsbR' &&
-                  deployment.projectId === 'prj_VgGmlwyx1g3XJbwPQ668D7c7q6Eq' && deployment.readyState === 'READY' &&
-                  deployment.target === 'production' && Array.isArray(deployment.alias) &&
-                  deployment.alias.includes('dgcamonitorindigo.vercel.app');
-              } else {
-                await response.body?.cancel();
-              }
+                signal: AbortSignal.timeout(5000) });
+            } catch {
+              return { reason: 'endpoint-unavailable' };
             }
-          } catch {
-            pass = false;
+            if (response.status === 200) {
+              try { return { body: await response.json() }; } catch { return { reason: 'inconsistent-api-response' }; }
+            }
+            try { await response.body?.cancel(); } catch {}
+            if (response.status === 401 || response.status === 403) return { reason: 'permission-denied' };
+            if (response.status >= 300 && response.status < 400) return { reason: 'redirect-rejected' };
+            if (response.status === 404) return { reason: missing };
+            if (response.status === 429 || response.status >= 500) return { reason: 'endpoint-unavailable' };
+            return { reason: 'inconsistent-api-response' };
           }
-          console.log(JSON.stringify({ check: 'vercel-token-live-rollback-target', outcome: pass ? 'PASS' : 'FAIL' }));
-          process.exitCode = pass ? 0 : 1;
+
+          async function verifyAssignment() {
+            const observations = [];
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const { body, reason } = await read(`/v4/aliases/${domain}`, 'alias-not-found');
+              if (reason === 'permission-denied' || reason === 'redirect-rejected') return fail(reason);
+              if (reason) {
+                observations.push({ reason });
+              } else if (!body || body.alias !== domain || body.projectId !== project || body.deletedAt != null ||
+                  body.redirect != null || body.redirectStatusCode != null || typeof body.deploymentId !== 'string' ||
+                  !/^dpl_[a-zA-Z0-9]+$/.test(body.deploymentId) || (body.deployment && body.deployment.id !== body.deploymentId)) {
+                observations.push({ reason: 'inconsistent-api-response' });
+              } else if (body.deploymentId === rollback) {
+                if (body.deployment?.url != null && body.deployment.url !== rollbackHost) {
+                  observations.push({ reason: 'inconsistent-api-response' });
+                } else {
+                  return pass;
+                }
+              } else {
+                observations.push({ reason: 'incorrect-alias-assignment', id: body.deploymentId });
+              }
+              if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            const first = observations[0];
+            return fail(observations.every(item => item.reason === first.reason && item.id === first.id) ?
+              first.reason : 'inconsistent-api-response');
+          }
+
+          async function verifyDeployment() {
+            const { body, reason } = await read(`/v13/deployments/${rollback}`, 'deployment-not-found');
+            if (reason) return fail(reason);
+            const shas = [body?.gitSource?.sha, body?.meta?.githubCommitSha, body?.meta?.gitCommitSha].filter(Boolean);
+            if (!body || typeof body.id !== 'string' || typeof body.projectId !== 'string' ||
+                typeof body.readyState !== 'string' || typeof body.target !== 'string' || typeof body.url !== 'string' ||
+                !shas.length || shas.some(sha => typeof sha !== 'string' || !/^[a-f0-9]{40}$/.test(sha)) ||
+                shas.some(sha => sha !== shas[0])) return fail('inconsistent-api-response');
+            if (body.id !== rollback || body.projectId !== project || body.target !== 'production' ||
+                body.url !== rollbackHost || shas[0] !== revision) return fail('incorrect-deployment-metadata');
+            return body.readyState === 'READY' ? pass : fail('deployment-not-ready');
+          }
+
+          const configured = env.DGCA_CONFIRMATION === 'VERIFY DGCA VERCEL ALIAS' &&
+            env.DGCA_MONITOR_ENABLED === 'false' && env.EMAIL_NOTIFICATIONS_ENABLED === 'false' &&
+            env.VERCEL_PROMOTION_VERIFY_TOKEN && env.NODE_TLS_REJECT_UNAUTHORIZED !== '0';
+          report('validation-configuration', configured ? pass : fail('invalid-configuration'));
+          if (!configured) {
+            process.exitCode = 1;
+          } else {
+            const alias = await verifyAssignment();
+            report('dedicated-live-alias', alias);
+            const deployment = await verifyDeployment();
+            report('rollback-deployment-metadata', deployment);
+            process.exitCode = alias.outcome === 'PASS' && deployment.outcome === 'PASS' ? 0 : 1;
+          }
           NODE
