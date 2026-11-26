@@ -159,7 +159,7 @@ export async function sendEmailDeliverySmokeTest({ appPassword, pdf, claimDelive
   }
   if (!appPassword) throw new Error('The Gmail app password is required');
   const from = 'dgcamonitor@gmail.com';
-  const to = 'chirag131004@gmail.com';
+  const to = ['chirag131004@gmail.com', 'chiragprabhat50@gmail.com'];
   const label = 'TEST ONLY - Synthetic DGCA email delivery check';
   const email = renderEmail({ title: label, section: 'regulation' }, {
     source: 'basic', priority: 'low',
@@ -185,18 +185,24 @@ export async function sendEmailDeliverySmokeTest({ appPassword, pdf, claimDelive
     const result = await smtp.sendMail({
       from: { name: 'DGCA Monitor Test', address: from },
       to,
-      envelope: { from, to: [to] },
+      envelope: { from, to: [...to] },
       subject: '[TEST ONLY] DGCA email delivery smoke test',
       html: email.html,
       text: email.text,
       attachments
     });
-    if (result.accepted?.length === 1 && result.accepted[0] === to && !result.rejected?.length) {
-      return { outcome: 'accepted-by-smtp', smtpVerified: true, attempted: true };
-    }
-    return { outcome: 'smtp-delivery-unconfirmed', smtpVerified: true, attempted: true };
+    const acceptedCount = Array.isArray(result.accepted) ? result.accepted.length : null;
+    const rejectedCount = Array.isArray(result.rejected) ? result.rejected.length : null;
+    const pendingCount = Array.isArray(result.pending) ? result.pending.length : result.pending === undefined ? 0 : null;
+    const acceptedExactEnvelope = acceptedCount === to.length && to.every(address => result.accepted.includes(address));
+    const outcome = acceptedExactEnvelope && rejectedCount === 0 && pendingCount === 0
+      ? 'accepted-by-smtp' : 'smtp-delivery-unconfirmed';
+    return { outcome, smtpVerified: true, attempted: true, acceptedCount, rejectedCount, pendingCount };
   } catch (error) {
     return { outcome: 'smtp-delivery-unconfirmed', smtpVerified: true, attempted: true,
+      acceptedCount: Array.isArray(error?.accepted) ? error.accepted.length : null,
+      rejectedCount: Array.isArray(error?.rejected) ? error.rejected.length : null,
+      pendingCount: Array.isArray(error?.pending) ? error.pending.length : null,
       code: SAFE_SMTP_CODES.has(error?.code) ? error.code : undefined };
   }
 }

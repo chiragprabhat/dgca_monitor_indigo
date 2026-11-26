@@ -3,7 +3,8 @@ import { runInEmailDeliverySmokeTest } from '../config/monitoring-smoke-context.
 import { smokeDatabaseTarget, smokeError } from '../config/smoke-database-target.js';
 import { sendEmailDeliverySmokeTest } from './notification-service.js';
 
-const CLAIM_KEY = 'email_delivery_smoke_v1_claimed';
+const PREVIOUS_CLAIM_KEY = 'email_delivery_smoke_v1_claimed';
+const CLAIM_KEY = 'email_delivery_smoke_v2_two_recipients_claimed';
 
 function fixturePdf() {
   const stream = 'BT /F1 14 Tf 30 75 Td (TEST ONLY - Synthetic DGCA email attachment) Tj ET';
@@ -29,20 +30,35 @@ export async function runEmailDeliverySmokeTest(env = process.env) {
   if (env.DGCA_MONITOR_ENABLED !== 'false') {
     throw smokeError('SMOKE_RECURRING_ENABLED', 'Recurring monitoring must remain disabled');
   }
-  if (env.EMAIL_DELIVERY_SMOKE_CONFIRMATION !== 'SEND ONE TEST EMAIL') {
+  if (env.EMAIL_NOTIFICATIONS_ENABLED !== 'false') {
+    throw smokeError('SMOKE_EMAIL_ENABLED', 'Automatic email must remain disabled');
+  }
+  if (env.GITHUB_RUN_ATTEMPT !== '1') {
+    throw smokeError('SMOKE_RUN_ATTEMPT', 'Reruns are disabled');
+  }
+  if (env.EMAIL_DELIVERY_SMOKE_CONFIRMATION !== 'SEND ONE TWO-RECIPIENT TEST EMAIL') {
     throw smokeError('SMOKE_CONFIRMATION', 'Explicit confirmation is required');
   }
   const appPassword = env.EMAIL_APP_PASSWORD?.trim();
   if (!appPassword) throw smokeError('SMOKE_SMTP_SECRET', 'The existing Gmail app password secret is required');
   const target = smokeDatabaseTarget(env);
+  const role = 'neondb_owner';
+  if (target.databaseName !== 'neondb' || decodeURIComponent(new URL(target.connectionString).username) !== role) {
+    throw smokeError('SMOKE_DATABASE', 'Expected the approved deployment-test database and role');
+  }
+  target.neonIdentity = { project: 'tiny-sea-21255890', branch: 'br-plain-pine-belvpen0', role };
   return runInEmailDeliverySmokeTest(target, async () => {
     try {
       await verifyMonitoringSmokeConnection();
       const db = getDatabase();
-      if (await db.prepare('SELECT 1 FROM config WHERE key = $1').get(CLAIM_KEY)) {
-        return { outcome: 'already-claimed' };
+      const previousClaim = await db.prepare('SELECT value FROM config WHERE key = $1').get(PREVIOUS_CLAIM_KEY);
+      if (previousClaim?.value !== 'true') {
+        throw smokeError('SMOKE_PREVIOUS_CLAIM', 'The previous single-recipient claim could not be verified');
       }
-      return await sendEmailDeliverySmokeTest({
+      if (await db.prepare('SELECT 1 FROM config WHERE key = $1').get(CLAIM_KEY)) {
+        return { outcome: 'already-claimed', databaseVerified: true, previousClaimPreserved: true };
+      }
+      const result = await sendEmailDeliverySmokeTest({
         appPassword,
         pdf: fixturePdf(),
         claimDelivery: async () => (await db.query(`
@@ -50,6 +66,7 @@ export async function runEmailDeliverySmokeTest(env = process.env) {
           ON CONFLICT (key) DO NOTHING
         `, [CLAIM_KEY])).rowCount === 1
       });
+      return { ...result, databaseVerified: true, previousClaimPreserved: true };
     } finally {
       await closeDatabase();
     }

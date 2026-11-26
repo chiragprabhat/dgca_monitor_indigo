@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type SEND ONE TEST EMAIL to authorize the single synthetic message
+        description: Type SEND ONE TWO-RECIPIENT TEST EMAIL to authorize one synthetic message to both approved recipients
         required: true
         type: string
 
@@ -17,7 +17,10 @@ concurrency:
 
 jobs:
   smoke-test:
-    if: github.ref == 'refs/heads/main' && vars.DGCA_MONITOR_ENABLED == 'false'
+    if: >-
+      github.ref == 'refs/heads/main' && github.run_attempt == '1' &&
+      inputs.confirmation == 'SEND ONE TWO-RECIPIENT TEST EMAIL' &&
+      vars.DGCA_MONITOR_ENABLED == 'false' && vars.EMAIL_NOTIFICATIONS_ENABLED == 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     defaults:
@@ -33,9 +36,10 @@ jobs:
           cache: npm
           cache-dependency-path: backend/node_api/package-lock.json
       - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
-      - name: Verify Gmail SMTP and send the single synthetic test
+      - name: Verify Gmail SMTP and send one synthetic message to both recipients
         env:
           DGCA_MONITOR_ENABLED: ${{ vars.DGCA_MONITOR_ENABLED }}
+          EMAIL_NOTIFICATIONS_ENABLED: ${{ vars.EMAIL_NOTIFICATIONS_ENABLED }}
           EMAIL_DELIVERY_SMOKE_CONFIRMATION: ${{ inputs.confirmation }}
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
           DEPLOYMENT_TEST_DATABASE_URL: ${{ secrets.DEPLOYMENT_TEST_DATABASE_URL }}
