@@ -37,14 +37,16 @@ async function readSettings(db) {
       if (key in settings) settings[key] = JSON.parse(value);
     }
   } catch (error) {
-    if (monitoringSmokeTest() || process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1') throw error;
+    if (monitoringSmokeTest() || process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1' ||
+        process.env.DGCA_NEON_RUNTIME === '1') throw error;
     logger.error('Could not read saved settings; using .env values', { error: error.message });
   }
   return settings;
 }
 
 export async function getSettings() {
-  if (monitoringSmokeTest() || process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1') return readSettings(getDatabase());
+  if (monitoringSmokeTest() || process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1' ||
+      process.env.DGCA_NEON_RUNTIME === '1') return readSettings(getDatabase());
   cache ??= readSettings(getDatabase());
   return cache;
 }

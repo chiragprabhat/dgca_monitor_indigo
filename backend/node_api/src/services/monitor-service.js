@@ -9,6 +9,7 @@ import { acquireMonitoringLock, getDatabase } from '../config/database.js';
 import { createLogger } from '../utils/logger.js';
 import { compareWithPrevious } from './revision-service.js';
 import { monitoringSmokeTest } from '../config/monitoring-smoke-context.js';
+import { checkWorkerDeadline } from './worker-deadline.js';
 
 const logger = createLogger('monitor-service');
 
@@ -48,7 +49,7 @@ export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) 
     logger.info('Starting DGCA website monitoring...');
     await initializeEmailService();
 
-    const strict = process.env.DGCA_ACTIONS_WORKER === '1';
+    const strict = process.env.DGCA_ACTIONS_WORKER === '1' || process.env.DGCA_NEON_RUNTIME === '1';
     const scrapeResult = await scrapeAllSections({ strict });
     sectionResults = scrapeResult.sectionResults;
     lock.assertHeld();
@@ -75,6 +76,7 @@ export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) 
       try {
         if (await processNewUpdate(update, lock.assertHeld, strict)) notificationsSent++;
       } catch (error) {
+        checkWorkerDeadline();
         logger.warn('Processing failed, will retry next cycle', { id: update.id, error: error.message });
       }
     }
@@ -95,6 +97,7 @@ export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) 
       ...(sectionResults && { sectionResults })
     };
   } catch (error) {
+    checkWorkerDeadline();
     const duration = Date.now() - startTime;
     logger.error('Monitoring cycle failed:', { error: error.message });
     await logMonitoringRun('failed', 0, 0, duration, error.message);

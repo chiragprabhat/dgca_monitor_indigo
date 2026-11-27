@@ -91,20 +91,34 @@ export function stopScheduler() {
   }
 }
 
+export function nextNeonExecution(now) {
+  const period = 30 * 60 * 1000;
+  const offset = 7 * 60 * 1000;
+  return new Date((Math.floor((now - offset) / period) + 1) * period + offset).toISOString();
+}
+
 export async function getSchedulerStatus() {
   const config = await settings();
   const { minutes, startHour, endHour } = config;
   const hosted = process.env.VERCEL === '1';
   const external = hosted || process.env.MONITOR_SCHEDULER === 'github';
-  const heartbeat = hosted && (await getDatabase().prepare(
-    "SELECT updated_at FROM config WHERE key = 'actions_worker_heartbeat'"
-  ).get())?.updated_at;
+  const heartbeat = hosted ? await getDatabase().prepare(
+    "SELECT updated_at, value FROM config WHERE key = 'actions_worker_heartbeat'"
+  ).get() : undefined;
+  const neon = heartbeat?.value === 'neon';
+  const now = Date.now();
+  const heartbeatTime = heartbeat?.updated_at ? Date.parse(`${heartbeat.updated_at.replace(' ', 'T')}Z`) : NaN;
+  const healthy = heartbeatTime > now - 45 * 60 * 1000;
   return {
-    running: hosted ? !!heartbeat && +new Date(`${heartbeat.replace(' ', 'T')}Z`) > Date.now() - 45 * 60 * 1000
-      : external || scheduledJob !== null,
+    running: hosted ? healthy : external || scheduledJob !== null,
     intervalMinutes: minutes,
     startHour,
     endHour,
-    cron: external ? scheduleExpression(config) : activeExpression
+    cron: neon ? '7,37 * * * *' : external ? scheduleExpression(config) : activeExpression,
+    ...(neon && {
+      provider: 'neon',
+      heartbeatAt: Number.isFinite(heartbeatTime) ? new Date(heartbeatTime).toISOString() : null,
+      nextExpectedRunAt: healthy ? nextNeonExecution(now) : null
+    })
   };
 }

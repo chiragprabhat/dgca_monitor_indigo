@@ -10,6 +10,7 @@ import ActivityLog from './pages/ActivityLog'
 import Settings from './pages/Settings'
 import SearchDocuments from './pages/SearchDocuments'
 import { api, getPrefs, readLocal, writeLocal, parseDbTime } from './api'
+import { pollWhileVisible } from './visible-polling'
 
 const LAST_SEEN_KEY = 'dgca-last-seen'
 
@@ -61,13 +62,12 @@ function App() {
   }, [])
 
   useEffect(() => {
-    fetchMonitoringStatus()
-    fetchLatest()
-    const status = setInterval(fetchMonitoringStatus, 30000)
-    const updates = setInterval(fetchLatest, 60000)
+    const stopPolling = pollWhileVisible(
+      () => Promise.all([fetchMonitoringStatus(), fetchLatest()]), 6 * 60 * 1000
+    )
     const onPrefs = () => setPrefsVersion(v => v + 1)
     window.addEventListener('dgca-prefs-changed', onPrefs)
-    return () => { clearInterval(status); clearInterval(updates); window.removeEventListener('dgca-prefs-changed', onPrefs) }
+    return () => { stopPolling(); window.removeEventListener('dgca-prefs-changed', onPrefs) }
   }, [fetchMonitoringStatus, fetchLatest])
 
   const markRead = () => {

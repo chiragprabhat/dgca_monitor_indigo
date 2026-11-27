@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { load } from 'cheerio';
 import { createLogger } from '../utils/logger.js';
+import { checkWorkerDeadline, workerDelay, workerSignal } from '../services/worker-deadline.js';
 
 const logger = createLogger('scraper');
 
@@ -33,6 +34,7 @@ async function fetchWithRetry(url, method = 'get', attempt = 1) {
       url,
       method,
       timeout: TIMEOUT_MS,
+      signal: workerSignal(),
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         ...(method === 'post' ? { Referer: DGCA_BASE_URL } : {})
@@ -40,10 +42,11 @@ async function fetchWithRetry(url, method = 'get', attempt = 1) {
     });
     return response.data;
   } catch (error) {
+    checkWorkerDeadline();
     if (attempt < RETRY_ATTEMPTS) {
       const delay = Math.pow(2, attempt) * 1000;
       logger.warn(`Fetch failed, retry ${attempt}/${RETRY_ATTEMPTS} after ${delay}ms`, { url });
-      await new Promise(resolve => setTimeout(resolve, delay));
+      await workerDelay(delay);
       return fetchWithRetry(url, method, attempt + 1);
     }
     throw error;
@@ -232,6 +235,7 @@ export async function fetchMoreList(sectionKey, { strict = false } = {}) {
     try {
       const response = await axios.post(`${DGCA_BASE_URL}scan?baseLocale=en_US`, body, {
         timeout: Math.max(TIMEOUT_MS, 60000),
+        signal: workerSignal(),
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -242,7 +246,7 @@ export async function fetchMoreList(sectionKey, { strict = false } = {}) {
       break;
     } catch (error) {
       if (attempt >= RETRY_ATTEMPTS) throw error;
-      await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+      await workerDelay(Math.pow(2, attempt) * 1000);
     }
   }
 
@@ -303,6 +307,7 @@ export async function validatePdfUrl(url) {
   try {
     const response = await axios.head(url, {
       timeout: 5000,
+      signal: workerSignal(),
       maxRedirects: 5
     });
     return response.status === 200;

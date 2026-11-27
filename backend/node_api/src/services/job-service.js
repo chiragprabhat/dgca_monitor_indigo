@@ -93,8 +93,8 @@ export async function deferJob(job) {
   await getDatabase().query("UPDATE dgca_jobs SET state = 'queued' WHERE id = $1 AND state = 'running'", [job.id]);
 }
 
-export async function saveJobProgress(job, progress) {
-  await getDatabase().query(`UPDATE dgca_jobs SET input = jsonb_set(input, '{progress}', $2::jsonb)
+export async function saveJobProgress(job, progress, db = getDatabase()) {
+  await db.query(`UPDATE dgca_jobs SET input = jsonb_set(input, '{progress}', $2::jsonb)
     WHERE id = $1 AND state = 'running'`, [job.id, JSON.stringify(progress)]);
 }
 

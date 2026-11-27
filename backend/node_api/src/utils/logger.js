@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-const LOG_DIR = process.env.VERCEL ? null : process.env.LOG_DIR || './logs';
+const LOG_DIR = process.env.VERCEL || process.env.DGCA_NEON_RUNTIME === '1' ? null : process.env.LOG_DIR || './logs';
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
 if (LOG_DIR && !fs.existsSync(LOG_DIR)) {

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { getDatabase } from '../config/database.js';
 import { extractText, FULL_DOCUMENT_PAGES } from './pdf-service.js';
 import { createLogger } from '../utils/logger.js';
+import { checkWorkerDeadline } from './worker-deadline.js';
 
 const logger = createLogger('upload-service');
 
@@ -41,6 +42,7 @@ export async function storeUpload(buffer, filename) {
   try {
     extracted = await extractText(buffer, FULL_DOCUMENT_PAGES);
   } catch (error) {
+    checkWorkerDeadline();
     logger.warn('Uploaded PDF could not be read', { error: error.message });
     throw fail('Could not read this PDF (it may be damaged or password-protected)', 422);
   }

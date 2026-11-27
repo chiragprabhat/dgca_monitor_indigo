@@ -1,4 +1,5 @@
 import { diffArrays } from 'diff';
+import { checkWorkerDeadline, remainingWorkerMs } from './worker-deadline.js';
 import { getDatabase, transaction } from '../config/database.js';
 import { fetchPdfWithText, FULL_DOCUMENT_PAGES, SUMMARY_PAGES } from './pdf-service.js';
 import { savePdfText } from './state-service.js';
@@ -83,7 +84,10 @@ export function toLines(text) {
 export function diffTexts(leftText, rightText) {
   const leftLines = toLines(leftText);
   const rightLines = toLines(rightText);
-  const parts = diffArrays(leftLines, rightLines);
+  checkWorkerDeadline();
+  const remaining = remainingWorkerMs();
+  const parts = diffArrays(leftLines, rightLines, Number.isFinite(remaining) ? { timeout: remaining } : {});
+  if (!parts) throw new DOMException('Document comparison deadline exceeded', 'TimeoutError');
   let added = 0, removed = 0, same = 0;
   const chunks = parts.map(p => {
     const type = p.added ? 'added' : p.removed ? 'removed' : 'same';

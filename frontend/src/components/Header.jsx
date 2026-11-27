@@ -18,6 +18,10 @@ function Header({ onMenuToggle, activePage, lastCheckTime, monitoringStatus, lat
   const panelRef = useRef(null)
   const pageInfo = PAGE_TITLES[activePage] || PAGE_TITLES.overview
   const isHealthy = monitoringStatus?.scheduler?.running
+  const scheduler = monitoringStatus?.scheduler
+  const formatMonitoringTime = value => new Date(value).toLocaleString('en-IN', {
+    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata'
+  })
   const lastCheck = lastCheckTime
     ? lastCheckTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })
     : 'Not yet'
@@ -55,6 +59,15 @@ function Header({ onMenuToggle, activePage, lastCheckTime, monitoringStatus, lat
           <div className="last-check">
             <small>Last check: {lastCheck}</small>
           </div>
+          {scheduler?.provider === 'neon' && (
+            <div className="last-check">
+              <small>
+                Neon · every {scheduler.intervalMinutes} min
+                {scheduler.heartbeatAt && ` · Heartbeat ${formatMonitoringTime(scheduler.heartbeatAt)} IST`}
+                {scheduler.nextExpectedRunAt && ` · Next expected ${formatMonitoringTime(scheduler.nextExpectedRunAt)} IST`}
+              </small>
+            </div>
+          )}
         </div>
 
         <div ref={panelRef} style={{ position: 'relative' }}>

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { api, formatDateTime } from '../api'
 import { formatDate } from './Priority'
+import { pollWhileVisible } from '../visible-polling'
 
 const SERIES_NAMES = { A: 'Scope and extent', B: 'IAL procedures and approval', C: 'Aerodrome operating minima', D: 'Load, trim and checklists', F: 'Flight crew', H: 'Helicopters', O: 'Operations', S: 'Specific approvals' }
 const muted = { color: 'var(--secondary-text, #6B7280)' }
@@ -17,15 +18,10 @@ function CarLibrary({ docs, label, busy, active, onCompare }) {
   const [query, setQuery] = useState('')
 
   const load = useCallback(() => api('/cars').then(setData).catch(e => setError(`Could not load the CAR list: ${e.message}`)), [])
-  useEffect(() => { load() }, [load])
-
   // While DGCA is being read, refresh every few seconds; otherwise every few minutes, so
   // the list follows the hourly check of DGCA without reloading the page.
   const syncingNow = !!data?.status?.syncing
-  useEffect(() => {
-    const t = setInterval(load, syncingNow ? 4000 : 5 * 60 * 1000)
-    return () => clearInterval(t)
-  }, [syncingNow, load])
+  useEffect(() => pollWhileVisible(load, syncingNow ? 4000 : 6 * 60 * 1000), [syncingNow, load])
 
   const refresh = async () => {
     try { await api('/cars/sync', { method: 'POST' }) } catch (e) { setError(e.message) }

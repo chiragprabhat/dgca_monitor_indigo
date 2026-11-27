@@ -10,9 +10,10 @@ import { claimJob, deferJob, enqueueJob, finishJob, jobStatus, recoverJobs, save
 import { checkForUpdates } from './monitor-service.js';
 import { testEmailConnection } from './notification-service.js';
 import { getGitHubMonitoringSlot } from './scheduler-service.js';
-import { getUnanalyzedUpdates } from './state-service.js';
+import { getUnanalyzedUpdates, logMonitoringRun } from './state-service.js';
 import { getSummaryProvider } from './summary-service.js';
 import { getHttpsAgent } from '../utils/system-ca.js';
+import { checkWorkerDeadline, withinWorkerDeadline, workerSignal } from './worker-deadline.js';
 
 const ok = (result, status = 200) => ({ status, result });
 const timed = result => ({ ...result, timestamp: new Date().toISOString() });
@@ -36,7 +37,8 @@ const handlers = {
     return ok(lastSync, lastSync?.error ? 502 : 200);
   },
   archive: async (input, job) => {
-    await importArchive({ awaitImport: true, progress: input.progress, checkpoint: progress => saveJobProgress(job, progress) });
+    await importArchive({ awaitImport: true, progress: input.progress,
+      checkpoint: (progress, db) => saveJobProgress(job, progress, db) });
     const { lastImport } = await getArchiveStatus();
     return ok({ lastImport }, lastImport?.error ? 502 : 200);
   },
@@ -54,6 +56,7 @@ export async function processActionsJob(job, assertHeld) {
     if (!handler) throw new Error('Unknown worker job');
     outcome = await handler(job.input, job);
   } catch (error) {
+    checkWorkerDeadline();
     const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
     outcome = ok({ success: false, error: status === 500 ? 'Background operation failed. Check the runner logs.' : error.message }, status);
     console.error('DGCA job failed:', job.kind, error.code || error.name);
@@ -66,13 +69,35 @@ export async function runActionsWorker(now = new Date()) {
   if (process.env.DGCA_ACTIONS_WORKER !== '1' || process.env.DGCA_MONITOR_ENABLED !== 'true') {
     throw new Error('The GitHub Actions worker is disabled');
   }
+  return runWorker(now);
+}
+
+export async function runNeonWorker(now, { maxJobMs = 180000, monitorMs = 180000 } = {}) {
+  if (process.env.DGCA_NEON_RUNTIME !== '1' || process.env.DGCA_MONITOR_ENABLED !== 'false' ||
+      process.env.EMAIL_NOTIFICATIONS_ENABLED !== 'false') {
+    throw new Error('The email-disabled Neon worker configuration is required');
+  }
+  return runWorker(now, { maxJobMs, monitorMs });
+}
+
+const resumableJobs = new Set(['car', 'archive', 'archive-analysis', 'compare', 'revision', 'upload']);
+
+async function runWorker(now, neon) {
   axios.defaults.httpsAgent = getHttpsAgent();
   const workerLock = await acquireMonitoringLock(5);
   if (!workerLock) return { busy: true };
   try {
     const db = getDatabase();
-    await recoverJobs();
+    if (!neon) await recoverJobs();
     const scheduledSlot = await getGitHubMonitoringSlot(now);
+    if (neon) {
+      if (!scheduledSlot) return { skipped: 'outside-monitoring-window' };
+      const claim = await db.query(`INSERT INTO config (key, value) VALUES ('neon_worker_last_slot', $1)
+        ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=dgca_utc_now()
+        WHERE config.value < EXCLUDED.value`, [scheduledSlot]);
+      if (!claim.rowCount) return { skipped: 'slot-already-claimed' };
+    }
+    if (neon) await recoverJobs();
     let providerReady = true;
     let monitoring = null;
     try {
@@ -83,9 +108,20 @@ export async function runActionsWorker(now = new Date()) {
       if (scheduledSlot) monitoring = { success: false, error: error.message };
     }
     if (providerReady) {
-      await db.query(`INSERT INTO config (key, value) VALUES ('actions_worker_heartbeat', 'true')
+      if (!neon) await db.query(`INSERT INTO config (key, value) VALUES ('actions_worker_heartbeat', 'true')
         ON CONFLICT (key) DO UPDATE SET updated_at = dgca_utc_now()`);
-      if (scheduledSlot) monitoring = await checkForUpdates({ scheduledSlot });
+      if (scheduledSlot) {
+        if (neon) {
+          const started = Date.now();
+          try {
+            monitoring = await withinWorkerDeadline(neon.monitorMs, () => checkForUpdates({ scheduledSlot }));
+          } catch (error) {
+            if (!['AbortError', 'TimeoutError'].includes(error.name)) throw error;
+            monitoring = { success: false, error: 'Monitoring deadline exceeded' };
+            await logMonitoringRun('failed', 0, 0, Date.now() - started, monitoring.error);
+          }
+        } else monitoring = await checkForUpdates({ scheduledSlot });
+      }
     } else {
       await db.query("DELETE FROM config WHERE key = 'actions_worker_heartbeat'");
     }
@@ -113,8 +149,29 @@ export async function runActionsWorker(now = new Date()) {
         }
         analyzedArchive = true;
       }
-      await processActionsJob(job, workerLock.assertHeld);
+      if (neon) {
+        try {
+          await withinWorkerDeadline(Math.max(1, Math.min(neon.maxJobMs, budget - Date.now())), async () => {
+            try {
+              await processActionsJob(job, workerLock.assertHeld);
+            } catch (error) {
+              if (!workerSignal().aborted) throw error;
+              throw workerSignal().reason;
+            }
+          });
+        } catch (error) {
+          if (error.name !== 'TimeoutError') throw error;
+          workerLock.assertHeld();
+          if (resumableJobs.has(job.kind)) await deferJob(job);
+          else await finishJob(job, 503, { success: false, error: 'The job reached its execution deadline. Check history before retrying.' });
+          break;
+        }
+      } else await processActionsJob(job, workerLock.assertHeld);
       processed++;
+    }
+    if (neon && monitoring?.success && !monitoring.skipped) {
+      await db.query(`INSERT INTO config (key, value) VALUES ('actions_worker_heartbeat', 'neon')
+        ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=dgca_utc_now()`);
     }
     return { processed, monitoring };
   } finally {

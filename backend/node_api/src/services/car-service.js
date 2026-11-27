@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { checkWorkerDeadline, workerDelay, workerSignal } from './worker-deadline.js';
 import * as cheerio from 'cheerio';
 import { getDatabase, transaction } from '../config/database.js';
 import { fetchPdfWithText, FULL_DOCUMENT_PAGES } from './pdf-service.js';
@@ -42,7 +43,7 @@ export async function fetchSectionList(section = 8) {
   });
   const res = await axios.post(`${BASE}scan?`, body.toString(), {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-    timeout: 45000
+    timeout: 45000, signal: workerSignal()
   });
   const $ = cheerio.load(res.data);
   const rows = [];
@@ -170,7 +171,7 @@ export async function syncCars({ section = 8 } = {}) {
       if (pdf) {
         await save.run(pdf.text || '', pdf.pageCount ?? null, car.id); summary.read++;
       } else summary.failed++;
-      await new Promise(r => setTimeout(r, PAUSE_BETWEEN_PDFS_MS));
+      await workerDelay(PAUSE_BETWEEN_PDFS_MS);
     }
     const amended = await db.prepare(`
       SELECT ch.id, h.pdf_text AS before, c.pdf_text AS after
@@ -191,6 +192,7 @@ export async function syncCars({ section = 8 } = {}) {
     lastSync = { startedAt, finishedAt: new Date().toISOString(), ...summary, error: null };
     logger.info(`CAR Section ${section}: ${summary.listed} listed, ${summary.added} new, ${summary.updated} amended, ${summary.revoked} revoked, ${summary.removed} removed, ${summary.read} PDFs read, ${summary.failed} failed`);
   } catch (error) {
+    checkWorkerDeadline();
     lastSync = { startedAt, finishedAt: new Date().toISOString(), ...summary, error: error.message };
     logger.warn('CAR sync failed', { error: error.message });
   } finally {

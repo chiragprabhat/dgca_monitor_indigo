@@ -4,6 +4,7 @@ import { checkServerIdentity } from 'node:tls';
 import pg from 'pg';
 import { createLogger } from '../utils/logger.js';
 import { monitoringSmokeTest, runWithBackgroundSmokeClient } from './monitoring-smoke-context.js';
+import { checkWorkerDeadline } from '../services/worker-deadline.js';
 
 const logger = createLogger('database');
 const schema = new URL('./schema.sql', import.meta.url);
@@ -32,6 +33,9 @@ function getPool() {
     enableChannelBinding: true,
     max: 5,
     connectionTimeoutMillis: 15000,
+    ...(process.env.DGCA_NEON_RUNTIME === '1' && {
+      statement_timeout: 15000, idle_in_transaction_session_timeout: 180000,
+    }),
     allowExitOnIdle: true,
     // Keep counts and identity IDs numeric in API responses.
     types: {
@@ -46,14 +50,18 @@ function getPool() {
 }
 
 function database(client) {
+  const query = (sql, params) => {
+    checkWorkerDeadline();
+    return client.query(sql, params);
+  };
   return {
-    query: (sql, params) => client.query(sql, params),
+    query,
     prepare(sql) {
       return {
-        all: async (...params) => (await client.query(sql, params)).rows,
-        get: async (...params) => (await client.query(sql, params)).rows[0],
+        all: async (...params) => (await query(sql, params)).rows,
+        get: async (...params) => (await query(sql, params)).rows[0],
         run: async (...params) => {
-          const result = await client.query(sql, params);
+          const result = await query(sql, params);
           return { changes: result.rowCount };
         }
       };
@@ -111,6 +119,23 @@ export async function verifyMonitoringSmokeConnection() {
   } finally {
     client.release();
   }
+}
+
+export async function verifyNeonWorkerConnection({ host, project, branch, role }) {
+  requireDirectMonitoringConnection();
+  const client = await getPool().connect();
+  try {
+    const socket = client.connection?.stream;
+    const certificate = socket?.encrypted && socket.authorized ? socket.getPeerCertificate() : null;
+    if (!certificate || checkServerIdentity(host, certificate)) throw new Error('Neon TLS verification failed');
+    const { rows: [identity] } = await client.query(`SELECT current_database() AS db, current_user AS role,
+      current_setting('neon.project_id', true) AS project, current_setting('neon.branch_id', true) AS branch,
+      current_setting('neon.endpoint_id', true) AS endpoint, pg_is_in_recovery() AS replica`);
+    if (identity.db !== 'neondb' || identity.role !== role || identity.project !== project ||
+        identity.branch !== branch || identity.endpoint !== host.split('.')[0] || identity.replica !== false) {
+      throw new Error('Neon worker database identity mismatch');
+    }
+  } finally { client.release(); }
 }
 
 export async function withBackgroundSmokeDatabase(callback) {
@@ -192,6 +217,7 @@ export async function acquireMonitoringLock(key = 4) {
 }
 
 export async function transaction(callback) {
+  checkWorkerDeadline();
   const smoke = monitoringSmokeTest();
   if (smoke?.backgroundClient) {
     const client = smoke.backgroundClient;
@@ -199,6 +225,7 @@ export async function transaction(callback) {
     await client.query(`SAVEPOINT ${savepoint}`);
     try {
       const result = await callback(database(client));
+      checkWorkerDeadline();
       await client.query(`RELEASE SAVEPOINT ${savepoint}`);
       return result;
     } catch (error) {
@@ -211,6 +238,7 @@ export async function transaction(callback) {
   try {
     await client.query('BEGIN');
     const result = await callback(database(client));
+    checkWorkerDeadline();
     await client.query('COMMIT');
     return result;
   } catch (error) {

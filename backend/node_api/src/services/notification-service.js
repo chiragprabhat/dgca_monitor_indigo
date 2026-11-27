@@ -42,7 +42,7 @@ const PRIORITY_STYLE = {
 };
 
 export async function isEmailEnabled() {
-  if (monitoringSmokeTest()) return false;
+  if (monitoringSmokeTest() || process.env.DGCA_NEON_RUNTIME === '1') return false;
   const worker = process.env.DGCA_ACTIONS_WORKER === '1';
   if (worker && process.env.EMAIL_NOTIFICATIONS_ENABLED !== 'true') return false;
   const { emailEnabled } = await getSettings();

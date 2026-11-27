@@ -37,7 +37,7 @@ export async function saveUpdate(update, options = {}) {
   const id = crypto.randomUUID();
 
   try {
-    return await transaction(async db => {
+    const persist = async db => {
       if (attachId) {
         await db.query("SELECT pg_advisory_xact_lock(13693, hashtext($1))", [attachId]);
         const existing = await db.prepare('SELECT id, title, in_dgca_archive FROM updates WHERE attach_id = $1').get(attachId);
@@ -81,7 +81,8 @@ export async function saveUpdate(update, options = {}) {
         isNew: result.changes > 0,
         hash
       };
-    });
+    };
+    return await (options.db ? persist(options.db) : transaction(persist));
   } catch (error) {
     logger.error('Error saving update:', { error: error.message, update });
     throw error;

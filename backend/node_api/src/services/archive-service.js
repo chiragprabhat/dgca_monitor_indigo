@@ -1,11 +1,12 @@
 import { fetchMoreList, SECTION_KEYS } from '../scrapers/dgca-scraper.js';
-import { saveUpdate, getUnanalyzedUpdates, savePdfText, saveAnalysis } from './state-service.js';
+import { generateHash, saveUpdate, getUnanalyzedUpdates, savePdfText, saveAnalysis } from './state-service.js';
 import { fetchPdfWithText } from './pdf-service.js';
 import { analyzePublication } from './summary-service.js';
 import { todayIST } from './priority-service.js';
-import { getDatabase } from '../config/database.js';
+import { getDatabase, transaction } from '../config/database.js';
 import { createLogger } from '../utils/logger.js';
 import { jobStatus, serverless } from './job-service.js';
+import { checkWorkerDeadline, workerDelay } from './worker-deadline.js';
 
 const logger = createLogger('archive');
 
@@ -14,7 +15,7 @@ export const ARCHIVE_EMAIL_STATUS = 'not sent - imported from the DGCA archive';
 const PAUSE_BETWEEN_PDFS_MS = 1500;
 const DOWNLOAD_RETRY_WAITS_MS = [10000, 30000];
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = workerDelay;
 
 async function analyseOne(row) {
   const url = (() => { try { return JSON.parse(row.pdf_urls || '[]')[0] || ''; } catch { return ''; } })();
@@ -62,6 +63,7 @@ export async function importArchive({ awaitImport = false, progress, checkpoint 
           try {
             items = await fetchMoreList(section);
           } catch (error) {
+            checkWorkerDeadline();
             logger.warn(`${section}: attempt ${attempt} to read the archive failed`, { error: error.message });
             if (attempt < 3) await sleep(attempt * 15000);
           }
@@ -70,6 +72,34 @@ export async function importArchive({ awaitImport = false, progress, checkpoint 
           failed.push(section);
           run.perSection[section] = { listed: 0, added: 0, error: 'DGCA did not return the list - try the import again later' };
           if (checkpoint) await checkpoint(run);
+          continue;
+        }
+        if (checkpoint && process.env.DGCA_NEON_RUNTIME === '1') {
+          const cursor = run.partialSection?.section === section
+            ? run.partialSection : { section, seen: [], added: 0, known: 0 };
+          const seen = new Set(cursor.seen);
+          const pending = items.filter(item => item.inArchive || item.publicationDate < today);
+          for (let offset = 0; offset < pending.length; offset += 20) {
+            await transaction(async db => {
+              for (const item of pending.slice(offset, offset + 20)) {
+                const hash = generateHash(item.section, item.title, item.publicationDate);
+                if (seen.has(hash)) continue;
+                const result = await saveUpdate(item, { origin: 'archive', emailStatus: ARCHIVE_EMAIL_STATUS, db });
+                seen.add(hash);
+                if (result.isNew) cursor.added++;
+                else cursor.known++;
+              }
+              cursor.seen = [...seen];
+              run.partialSection = cursor;
+              await checkpoint(run, db);
+            });
+          }
+          run.perSection[section] = { listed: items.length, added: cursor.added };
+          run.added += cursor.added;
+          run.alreadyKnown += cursor.known;
+          delete run.partialSection;
+          await checkpoint(run);
+          await sleep(3000);
           continue;
         }
         let added = 0;
@@ -88,6 +118,7 @@ export async function importArchive({ awaitImport = false, progress, checkpoint 
       if (failed.length) run.error = `Could not read ${failed.join(', ')} from DGCA - run the import again to fill them in`;
       logger.info(`Archive import finished: ${run.added} publications added${failed.length ? `, failed: ${failed.join(', ')}` : ''}`);
     } catch (error) {
+      checkWorkerDeadline();
       run.error = error.message;
       logger.error('Archive import failed', { error: error.message });
     } finally {
@@ -118,6 +149,7 @@ export function startAnalysis({ maxItems = Infinity } = {}) {
           try {
             await analyseOne(row);
           } catch (error) {
+            checkWorkerDeadline();
             // Mark it analysed with no text so one bad PDF can't stall the queue.
             await getDatabase().prepare("UPDATE updates SET analyzed_at = $1, pdf_text = COALESCE(pdf_text, '') WHERE id = $2")
               .run(new Date().toISOString(), row.id);
@@ -128,6 +160,7 @@ export function startAnalysis({ maxItems = Infinity } = {}) {
       }
       if (remaining > 0) logger.info('Archive analysis complete');
     } catch (error) {
+      checkWorkerDeadline();
       state.analysisError = error.message;
       logger.error('Archive analysis stopped', { error: error.message });
     } finally {
