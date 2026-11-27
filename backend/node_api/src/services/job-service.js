@@ -74,7 +74,7 @@ export async function claimJob(id = null) {
       SELECT id FROM dgca_jobs WHERE state = 'queued' AND ($1::uuid IS NULL OR id = $1)
       ORDER BY (kind IN ('archive', 'car')), created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
     )
-    RETURNING id, kind, input
+    RETURNING id, kind, input, created_at
   `, [id]);
   return job;
 }

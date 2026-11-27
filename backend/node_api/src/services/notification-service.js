@@ -8,6 +8,7 @@ import { formatDate } from './summary-service.js';
 import { getSettings } from './settings-service.js';
 import { getTrustedCAs } from '../utils/system-ca.js';
 import { parseRevision } from './revision-service.js';
+import { activationTime, claimRecipients, classifyDelivery, eligiblePublication, recordDelivery, savedEmailEnabled } from './recipient-delivery-service.js';
 
 const logger = createLogger('notification-service');
 
@@ -42,7 +43,8 @@ const PRIORITY_STYLE = {
 };
 
 export async function isEmailEnabled() {
-  if (monitoringSmokeTest() || process.env.DGCA_NEON_RUNTIME === '1') return false;
+  if (monitoringSmokeTest()) return false;
+  if (process.env.DGCA_NEON_RUNTIME === '1') return activationTime() !== null && await savedEmailEnabled();
   const worker = process.env.DGCA_ACTIONS_WORKER === '1';
   if (worker && process.env.EMAIL_NOTIFICATIONS_ENABLED !== 'true') return false;
   const { emailEnabled } = await getSettings();
@@ -74,9 +76,26 @@ function createSmtpTransport({ host, port, secure, user, pass }, extra = {}) {
   });
 }
 
+const gmailSender = 'dgcamonitor@gmail.com';
+function gmailTransport(appPassword) {
+  return createSmtpTransport({ host: 'smtp.gmail.com', port: 465, secure: true, user: gmailSender, pass: appPassword }, {
+    tls: { rejectUnauthorized: true, servername: 'smtp.gmail.com', minVersion: 'TLSv1.2' },
+    disableFileAccess: true, disableUrlAccess: true,
+    connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 20000
+  });
+}
+
 export async function initializeEmailService() {
+  if (process.env.VERCEL === '1') return null;
   if (!await isEmailEnabled()) return null;
   if (transporter) return transporter;
+
+  if (process.env.DGCA_NEON_RUNTIME === '1') {
+    const password = process.env.NEON_GMAIL_APP_PASSWORD?.replace(/\s+/g, '');
+    if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0' || !/^[A-Za-z]{16}$/.test(password ?? '')) return null;
+    transporter = gmailTransport(password);
+    return transporter;
+  }
 
   const host = process.env.SMTP_HOST;
   const user = process.env.SMTP_USER || process.env.EMAIL_FROM;
@@ -111,7 +130,9 @@ function pdfAttachments(pdf, enabled, maxBytes) {
 }
 
 // update: a row from the updates table. analysis/pdf come from the monitor cycle.
-export async function sendNotification(update, { analysis, pdf, automatic, assertHeld } = {}) {
+export async function sendNotification(update, { analysis, pdf, automatic, retry = false, assertHeld } = {}) {
+  if (process.env.DGCA_NEON_RUNTIME === '1') return sendTrackedNotification(update, { analysis, pdf, automatic, retry, assertHeld });
+  if (process.env.VERCEL === '1') return { success: false, skipped: true, error: 'Email must be sent by the worker' };
   if (!await isEmailEnabled()) {
     return { success: false, skipped: true, error: 'Email notifications disabled (EMAIL_NOTIFICATIONS_ENABLED is not true)' };
   }
@@ -150,6 +171,45 @@ export async function sendNotification(update, { analysis, pdf, automatic, asser
     await logNotification(update.id, recipients.join(', '), 'failed', reason);
     return { success: false, error: reason };
   }
+}
+
+async function sendTrackedNotification(update, { analysis, pdf, automatic, retry, assertHeld }) {
+  if (!await isEmailEnabled() || !eligiblePublication(update, activationTime())) {
+    return { success: false, skipped: true, error: 'Email is disabled or publication is outside the activation window' };
+  }
+  if (automatic && retry) return { success: false, skipped: true, error: 'Recipient retries require operator approval' };
+  const settings = await getSettings();
+  const recipients = [...new Set(settings.recipients.map(address => address.toLowerCase()))];
+  if (!recipients.length || recipients.some(address => !/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(address))) {
+    return { success: false, error: 'Invalid recipient configuration' };
+  }
+  const smtp = await initializeEmailService();
+  if (!smtp) return { success: false, error: 'Email service is unavailable' };
+  const email = renderEmail(update, analysis);
+  const { attachments } = pdfAttachments(pdf, settings.attachPdf, 15 * 1024 * 1024);
+  assertHeld?.();
+  const attempt = await claimRecipients(update.id, recipients, activationTime(), retry);
+  if (!attempt) return { success: false, alreadyAttempted: true, error: 'No eligible unclaimed recipients' };
+
+  let info;
+  let error;
+  assertHeld?.();
+  if (!await isEmailEnabled() || !eligiblePublication(update, activationTime())) {
+    const blocked = Object.fromEntries(attempt.addresses.map(address => [address, { state: 'rejected', retryable: false }]));
+    await recordDelivery(update.id, attempt, blocked);
+    return { success: false, skipped: true, tracked: true, error: 'Email permission was withdrawn before submission' };
+  }
+  try {
+    info = await smtp.sendMail({
+      from: { name: senderName(), address: gmailSender },
+      to: attempt.addresses, envelope: { from: gmailSender, to: attempt.addresses },
+      subject: email.subject, html: email.html, text: email.text, attachments
+    });
+  } catch (failure) {
+    error = failure;
+  }
+  const result = await recordDelivery(update.id, attempt, classifyDelivery(attempt.addresses, info, error));
+  return { ...result, tracked: true, ...(result.success ? {} : { error: 'One or more recipients require delivery review' }) };
 }
 
 const SAFE_SMTP_CODES = new Set(['EAUTH', 'ECONNECTION', 'ECONNREFUSED', 'ECONNRESET', 'EENVELOPE',
@@ -413,16 +473,17 @@ export async function getNotificationHistory(limit = 20) {
 }
 
 export async function testEmailConnection() {
-  if (monitoringSmokeTest()) return { success: false, error: 'Email disabled for monitoring smoke test' };
-  if (process.env.DGCA_ACTIONS_WORKER === '1' && !await isEmailEnabled()) {
+  if (process.env.VERCEL === '1' || !await isEmailEnabled()) {
     return { success: false, error: 'Email notifications disabled' };
   }
   if (!transporter) transporter = await initializeEmailService();
   if (!transporter) return { success: false, error: await isEmailEnabled() ? 'Email service not configured' : 'Email notifications disabled' };
   try {
+    if (!await isEmailEnabled()) return { success: false, error: 'Email notifications disabled' };
     await transporter.verify();
     return { success: true, message: 'Email connection verified' };
   } catch (error) {
-    return { success: false, error: explainEmailError(error) };
+    return { success: false, error: process.env.DGCA_NEON_RUNTIME === '1'
+      ? 'Gmail authentication or connection check failed' : explainEmailError(error) };
   }
 }

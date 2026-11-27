@@ -14,7 +14,7 @@ Compress-Archive -Path '<staging-directory>/*' -DestinationPath '<output-zip>'
 
 The production archive contains `index.mjs`, `pdf.mjs`, `pdf.worker.mjs`, `schema.sql`, and `deployment.sql`. The package loader retains PDF.js as separate Node ESM files. Use the default builder mode for production. The optional `proof` mode targets only `deployment-test` and includes a synthetic scratch harness.
 
-The production entry point requires the approved Neon branch, verified direct endpoint and TLS identity, an authenticated Neon event, a recent scheduled slot and saved basic summaries at a 30-minute interval. PostgreSQL session locks coordinate worker activity and the durable slot claim prevents a repeated invocation from running the queue twice. The email-disabled version blocks both automatic and manual delivery in the Function.
+The production entry point requires the approved Neon branch, verified direct endpoint and TLS identity, an authenticated Neon event, a recent scheduled slot and saved basic summaries at a 30-minute interval. PostgreSQL session locks coordinate worker activity and the durable slot claim prevents a repeated invocation from running the queue twice. The worker defaults to email off and requires separate activation of real delivery.
 
 ## Separately approved canary
 
@@ -49,6 +49,31 @@ Record project usage daily during the initial observation period. The warning th
 | Function invocations | 1,000,000 | 750,000 | 900,000 |
 
 Use the Neon project metrics for quota checks. Where Function billing telemetry is unavailable, record the invocation count, aggregate wall time and process CPU separately. Aggregate wall time is a conservative planning proxy, and process CPU does not represent billable active Capacity-Hours. Review this gap before committing to a full month. See the [Neon Free plan and billing metrics](https://neon.com/docs/introduction/plans).
+
+## Separately approved production email activation
+
+1. Verify a recent successful production heartbeat, the verified backup, the two approved saved recipients, and the production Function and trigger identities. Keep saved `emailEnabled=false`. Deploy the reviewed recipient-tracking package between scheduled slots once the previous invocation has ended. Preserve the existing trigger ID, 30-minute cron, `NEON_WORKER_ENABLED=true` and `DGCA_MONITOR_ENABLED=false`. Verify a healthy scheduled run with `EMAIL_NOTIFICATIONS_ENABLED=false`. Stage and verify the updated Vercel API if operator retries will be used. The older API does not pass through the retry request field.
+2. After separate approval, configure `NEON_GMAIL_APP_PASSWORD` as a secret on the production Function. Set `EMAIL_NOTIFICATIONS_ENABLED=true` and an explicitly approved, canonical UTC `NEON_EMAIL_ACTIVATED_AT` with milliseconds, for example `2026-11-27T16:30:00.000Z`. Choose a time at or after the intended activation so existing queued email jobs and detected publications are ineligible. Keep saved email disabled while checking the deployment. Leave the GitHub worker variables and trigger unchanged.
+3. Enable saved `emailEnabled` in the application only after verifying the worker configuration, recipient list, and cutoff. Leave `sameDayOnly` on. The Neon sender also enforces the IST day of detection and current IST day independently of that setting. Only a monitored publication detected at or after the cutoff can qualify. The automatic path also respects the configured categories and priority filter.
+4. Observe the first eligible new publication. Confirm the journal outcome for each recipient and aggregate `sent` only when every original recipient is accepted. SMTP acceptance means the server accepted the message. Confirm inbox receipt separately if required. Use deployment-test fixtures and the existing accepted synthetic email evidence for verification.
+
+### Emergency email-only stop
+
+Set saved `emailEnabled=false` in Settings and verify the value. The worker rechecks that saved permission before SMTP submission. An attempt already submitted to SMTP may still finish. Between invocations, deploy the same package with `EMAIL_NOTIFICATIONS_ENABLED=false` and clear `NEON_GMAIL_APP_PASSWORD` and `NEON_EMAIL_ACTIVATED_AT` with empty values. Verify the next monitoring run and heartbeat. Keep `NEON_WORKER_ENABLED=true` and the schedule enabled. A later email restart needs a fresh cutoff and separate approval.
+
+### Recipient reconciliation and retries
+
+The journal uses the existing `config` table with one `neon_email_delivery_v1:<update-id>` key per attempted publication. The history table contains a summary per attempt. The journal records accepted, rejected, pending and ambiguous states per recipient. Inspect it in an authorized read-only session.
+
+```sql
+SELECT key, updated_at, value::jsonb AS delivery
+FROM config
+WHERE key = 'neon_email_delivery_v1:' || $1;
+```
+
+An interrupted SMTP claim stays ambiguous. Review Gmail Sent, available SMTP evidence and inbox receipt before taking any manual reconciliation decision. Preserve the claim and record the evidence in the incident record. A missing inbox message alone is insufficient evidence for resending. Pending, ambiguous and accepted recipients are excluded from retries.
+
+An operator may request one retry for definitively transient failures through the updated authenticated endpoint `POST /api/notifications/test/<update-id>` with JSON `{"retry":true}`. Wait at least five minutes, keep both email gates enabled, and retry within the same IST eligibility day. Only a still-configured recipient with a recorded transient rejection and exactly one prior attempt qualifies. Authentication failures and permanent rejections require investigation. Recovered interrupted email jobs fail closed and are never requeued automatically. Preserve historical notification rows and all original claims.
 
 ## Budget and notification checks
 

@@ -33,8 +33,8 @@ let cache = null;
 async function readSettings(db) {
   const settings = envDefaults();
   try {
-    for (const { key, value } of await db.prepare('SELECT key, value FROM config').all()) {
-      if (key in settings) settings[key] = JSON.parse(value);
+    for (const { key, value } of await db.prepare('SELECT key, value FROM config WHERE key = ANY($1::text[])').all(Object.keys(settings))) {
+      settings[key] = JSON.parse(value);
     }
   } catch (error) {
     if (monitoringSmokeTest() || process.env.VERCEL === '1' || process.env.DGCA_ACTIONS_WORKER === '1' ||

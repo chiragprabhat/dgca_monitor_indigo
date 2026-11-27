@@ -10,6 +10,7 @@ import { createLogger } from '../utils/logger.js';
 import { compareWithPrevious } from './revision-service.js';
 import { monitoringSmokeTest } from '../config/monitoring-smoke-context.js';
 import { checkWorkerDeadline } from './worker-deadline.js';
+import { activationTime, eligiblePublication } from './recipient-delivery-service.js';
 
 const logger = createLogger('monitor-service');
 
@@ -71,7 +72,9 @@ export async function checkForUpdates({ scheduledSlot, onScheduledStart } = {}) 
     const pending = await getPendingEmailUpdates();
     if (pending.length > newIds.length) logger.info(`Resuming ${pending.length - newIds.length} publication(s) left unsent by an earlier cycle`);
     let notificationsSent = 0;
+    const cutoff = activationTime();
     for (const update of pending) {
+      if (process.env.DGCA_NEON_RUNTIME === '1' && cutoff !== null && !eligiblePublication(update, cutoff)) continue;
       lock.assertHeld();
       try {
         if (await processNewUpdate(update, lock.assertHeld, strict)) notificationsSent++;
@@ -132,9 +135,9 @@ async function processNewUpdate(update, assertHeld, strict) {
     return false;
   }
 
-  // "Same day" means the day it was detected, so an alert delayed by a restart still goes out.
+  // The Neon delivery path rechecks same-day and cutoff eligibility against the locked row.
   const detectedDay = todayIST(update.detected_at);
-  if (settings.sameDayOnly && update.publication_date !== detectedDay) {
+  if (process.env.DGCA_NEON_RUNTIME !== '1' && settings.sameDayOnly && update.publication_date !== detectedDay) {
     await setEmailStatus(update.id, `not sent - published ${formatDate(update.publication_date)}, not the day it was detected`);
     logger.info(`No email: "${title}" was published ${update.publication_date}, detected ${detectedDay}`);
     return false;
@@ -142,7 +145,9 @@ async function processNewUpdate(update, assertHeld, strict) {
 
   const result = await sendNotification({ ...update, revision }, { analysis, pdf, assertHeld, automatic: true });
   if (result.alreadyAttempted) return false;
-  await setEmailStatus(update.id, result.success ? `sent ${new Date().toISOString()}` : `failed - ${result.error}`);
+  if (process.env.DGCA_NEON_RUNTIME !== '1') {
+    await setEmailStatus(update.id, result.success ? `sent ${new Date().toISOString()}` : `failed - ${result.error}`);
+  }
   return result.success;
 }
 

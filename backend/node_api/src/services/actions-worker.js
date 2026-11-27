@@ -14,6 +14,7 @@ import { getUnanalyzedUpdates, logMonitoringRun } from './state-service.js';
 import { getSummaryProvider } from './summary-service.js';
 import { getHttpsAgent } from '../utils/system-ca.js';
 import { checkWorkerDeadline, withinWorkerDeadline, workerSignal } from './worker-deadline.js';
+import { activationTime } from './recipient-delivery-service.js';
 
 const ok = (result, status = 200) => ({ status, result });
 const timed = result => ({ ...result, timestamp: new Date().toISOString() });
@@ -24,7 +25,7 @@ const handlers = {
   upload: async input => ok(await processUpload(input.id), 201),
   'test-email': async input => {
     await getSummaryProvider();
-    return sendTestNotification(input.id);
+    return sendTestNotification(input.id, input.retry === true);
   },
   'smtp-check': async () => ok(timed(await testEmailConnection())),
   monitor: async () => {
@@ -54,7 +55,11 @@ export async function processActionsJob(job, assertHeld) {
   try {
     const handler = Object.hasOwn(handlers, job.kind) && handlers[job.kind];
     if (!handler) throw new Error('Unknown worker job');
-    outcome = await handler(job.input, job);
+    const emailJob = ['test-email', 'smtp-check'].includes(job.kind) && process.env.DGCA_NEON_RUNTIME === '1';
+    const cutoff = emailJob ? activationTime() : null;
+    outcome = emailJob && (cutoff === null || !job.created_at || !(+new Date(job.created_at) >= cutoff))
+      ? ok({ success: false, error: 'Email job predates activation or delivery is disabled' }, 409)
+      : await handler(job.input, job);
   } catch (error) {
     checkWorkerDeadline();
     const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
@@ -73,9 +78,8 @@ export async function runActionsWorker(now = new Date()) {
 }
 
 export async function runNeonWorker(now, { maxJobMs = 180000, monitorMs = 180000 } = {}) {
-  if (process.env.DGCA_NEON_RUNTIME !== '1' || process.env.DGCA_MONITOR_ENABLED !== 'false' ||
-      process.env.EMAIL_NOTIFICATIONS_ENABLED !== 'false') {
-    throw new Error('The email-disabled Neon worker configuration is required');
+  if (process.env.DGCA_NEON_RUNTIME !== '1' || process.env.DGCA_MONITOR_ENABLED !== 'false') {
+    throw new Error('The direct Neon worker configuration is required');
   }
   return runWorker(now, { maxJobMs, monitorMs });
 }

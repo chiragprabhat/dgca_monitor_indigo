@@ -86,7 +86,7 @@ function enabled() {
   if (cutoff && !(Date.now() < Date.parse(cutoff))) return false;
   return process.env.NEON_BRANCH_ID === production.branch &&
     process.env.NEON_WORKER_ENABLED === 'true' &&
-    process.env.DGCA_MONITOR_ENABLED === 'false' && process.env.EMAIL_NOTIFICATIONS_ENABLED === 'false';
+    process.env.DGCA_MONITOR_ENABLED === 'false';
 }
 
 async function execute(time) {
@@ -105,8 +105,8 @@ async function execute(time) {
     await verifyNeonWorkerConnection(production);
     const { getSettings } = await import('../services/settings-service.js');
     const settings = await getSettings();
-    if (settings.emailEnabled !== false || settings.intervalMinutes !== 30 || settings.summaryProvider !== 'basic') {
-      throw new Error('Worker settings are outside the approved canary configuration');
+    if (settings.intervalMinutes !== 30 || settings.summaryProvider !== 'basic') {
+      throw new Error('Worker monitoring configuration is not approved');
     }
     const { runNeonWorker } = await import('../services/actions-worker.js');
     return await runNeonWorker(time);
