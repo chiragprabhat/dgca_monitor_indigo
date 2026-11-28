@@ -29,11 +29,13 @@ Disable the Neon trigger and verify that its next run is empty. Deploy the same 
 
 Keep the original GitHub worker gated off. Preserve job progress, monitoring claims and any existing notification claims. The next approved slot recovers resumable interrupted jobs. Archive records and progress commit together in batches, CAR retains completed document reads, and uploads deduplicate by content hash. A timed-out monitor or email-capable job requires inspection before manual retry. Existing results can remain visible for up to 45 minutes after the most recent successful heartbeat.
 
-## Continuous production operation
+## Initial monitoring-only rollout
 
 Reuse the canary-verified ZIP on the production branch. Keep the trigger disabled while updating the Function configuration. Set `NEON_WORKER_ENABLED=true` with the existing trigger ID. Clear `NEON_WORKER_CUTOFF_UTC` explicitly with an empty value and verify the cutoff key is absent from the active deployment. Neon merges environment changes and retains unmentioned keys. Keep both GitHub flags false in both repositories, the original cron disabled and the private runner gated. Keep saved email disabled and leave SMTP credentials out of the Function. Verify the active deployment before enabling the existing trigger. Its first scheduled run must fall on a UTC minute ending in 07 or 37.
 
-Check the dashboard daily for the last successful heartbeat, the 30-minute interval and the next expected slot. The website derives that time from the cron and heartbeat freshness. Check the Neon trigger for the authoritative next run. The dashboard and idle CAR library pause polling in hidden tabs and refresh no more than every six minutes per visible view during normal operation. Job and CAR progress retain their faster status checks while work is pending.
+## Continuous production operation
+
+The current production configuration is recorded under **Stage 2 production record**. Check the dashboard daily for the last successful heartbeat, the 30-minute interval and the next expected slot. The website derives that time from the cron and heartbeat freshness. Check the Neon trigger for the authoritative next run. The dashboard and idle CAR library pause polling in hidden tabs and refresh no more than every six minutes per visible view during normal operation. Job and CAR progress retain their faster status checks while work is pending.
 
 Check Function logs and monitoring history daily. Each slot should account for all four sections and leave one successful monitoring log and one set of slot claims. A missing heartbeat, partial scrape, duplicate execution, unexpected write, unresolved delivery claim or persistent job error calls for investigation and an emergency stop if it cannot be explained promptly. Do not clear a durable claim to replay a slot. Check job state and committed progress before recovering interrupted work.
 
@@ -52,7 +54,31 @@ Use the Neon project metrics for quota checks. Where Function billing telemetry 
 
 ## Separately approved production email activation
 
-1. Verify a recent successful production heartbeat, the verified backup, the two approved saved recipients, and the production Function and trigger identities. Keep saved `emailEnabled=false`. Deploy the reviewed recipient-tracking package between scheduled slots once the previous invocation has ended. Preserve the existing trigger ID, 30-minute cron, `NEON_WORKER_ENABLED=true` and `DGCA_MONITOR_ENABLED=false`. Verify a healthy scheduled run with `EMAIL_NOTIFICATIONS_ENABLED=false`. Stage and verify the updated Vercel API if operator retries will be used. The older API does not pass through the retry request field.
+### Stage 1 rollout record
+
+On 27 November 2026, production Function `dgcaproduction` advanced from deployment `7` to `8` between slots using revision `a97bcefdf590557108149c5c308c66ec76f9d28f`. The ZIP SHA-256 was `a4dafc61d508df3c8b197925cafbd897d168d593e315cc7a4abcff1bea250ef8`. Rebuilding the five package files from the approved source produced matching hashes. The verified deployment `7` package remains the rollback artifact. Keep the existing schedule and slot claims if rollback is required.
+
+The unchanged trigger ran at 21:37 IST and logged one successful invocation in 14.53 seconds. Monitoring log `32` and the heartbeat were recorded at 21:37:16 IST. Both durable slot claims matched. Each DGCA section returned ten listings and there were zero new publications. No jobs were processed and the CAR refresh was not due. Historical logs and publications, notifications, saved settings and delivery claims matched the pre-deployment snapshot. Saved email and the worker email flag stayed false. The Function had no SMTP secret or email cutoff, and the run recorded zero email activity.
+
+The Neon control plane reported PostgreSQL idle at 21:43:39 IST and confirmed the next scheduled slot at 22:07 IST. The project counters showed 11.32 CU-hours and 448.11 MB of transfer. Production logical storage was 35.29 MB. Deployment `8` remained active.
+
+### Stage 2 production record
+
+On 28 November 2026, Vercel deployment `dpl_B6HXqo8h9rGmK6pF8dGh3RzU2J3M` was built from the same revision as the worker. Authenticated reads of settings, notification history and monitoring status passed on the immutable URL with email disabled. The dedicated alias API confirmed that `dgcamonitorindigo.vercel.app` moved from `dpl_Am1FVXrCpUHt8xd2WgBZbg2HhauF` to the verified deployment. The API queues recipient retry requests for evaluation by the worker.
+
+Neon production Function `dgcaproduction` deployment `9` uses the Stage 1 ZIP and production branch `br-gentle-bread-beix3pqb`. Trigger `trigger-1058de33-7176-4c3b-8c05-2039d1f55a48` continues at minutes 07 and 37 each hour. The deployment supplied the Gmail app password and worker email permission before the authenticated Settings API enabled the saved permission. The eligibility cutoff is **2026-11-28T17:15:20.558Z** (22:45:20.558 IST). A read-only database check confirmed the opt-in, 41 unchanged historical updates, three unchanged notification records, zero claims and zero active jobs.
+
+All four categories qualify: Tenders, Regulation, Guidance and Announcements. The minimum priority is low, which includes low, medium and high. An automatic alert requires a newly detected monitor-origin publication at or after the cutoff whose publication, detection and delivery dates agree in IST. The worker addresses the two approved saved recipients through Gmail using port 465 and certificate-verified TLS. No historical catch-up or automatic recipient retry is authorized.
+
+Before activation, the project reported 45,986 compute seconds and 539,053,934 bytes of transfer for the usage period beginning November 23. The production branch reported 35,332,096 bytes of logical storage. Review project-wide storage in the Console, including other branches and restore history. The control-plane measurements do not include billed Function active or waiting Capacity-Hours.
+
+The first email-enabled slot ran at 23:07 IST on November 28. Neon recorded one invocation and one completion. Monitoring log `83` recorded success at 17:37:18 UTC. The worker checked ten listings in each of the four sections and discovered zero new publications. The heartbeat identified Neon and both durable claims matched the 17:30 UTC slot. No jobs were processed or left active. Function wall time was 16.740 seconds, process CPU time was 1.875 seconds and RSS was 164,777,984 bytes. Historical update and notification fingerprints matched the preflight. The notification count remained three, with zero delivery claims and zero recipient journals. The first real regulatory delivery remains pending an eligible publication.
+
+After the slot, project transfer was 539,884,112 bytes. Reported compute seconds and branch logical storage were unchanged at the measurement time. These are cumulative readings with reporting lag. The production database had returned to idle between configuration verification and this slot. Both temporary local credential files were removed and their absence verified. The required Gmail secret remains on the production Function.
+
+### Stage 2 rollout procedure
+
+1. Verify a recent successful production heartbeat, the verified backup, the two approved saved recipients, and the production Function and trigger identities. Confirm the Stage 1 deployment or its reviewed successor remains active. Keep saved `emailEnabled=false`. Preserve the existing trigger ID, 30-minute cron, `NEON_WORKER_ENABLED=true` and `DGCA_MONITOR_ENABLED=false`. Stage and verify the updated Vercel API if operator retries will be used. The older API does not pass through the retry request field.
 2. After separate approval, configure `NEON_GMAIL_APP_PASSWORD` as a secret on the production Function. Set `EMAIL_NOTIFICATIONS_ENABLED=true` and an explicitly approved, canonical UTC `NEON_EMAIL_ACTIVATED_AT` with milliseconds, for example `2026-11-27T16:30:00.000Z`. Choose a time at or after the intended activation so existing queued email jobs and detected publications are ineligible. Keep saved email disabled while checking the deployment. Leave the GitHub worker variables and trigger unchanged.
 3. Enable saved `emailEnabled` in the application only after verifying the worker configuration, recipient list, and cutoff. Leave `sameDayOnly` on. The Neon sender also enforces the IST day of detection and current IST day independently of that setting. Only a monitored publication detected at or after the cutoff can qualify. The automatic path also respects the configured categories and priority filter.
 4. Observe the first eligible new publication. Confirm the journal outcome for each recipient and aggregate `sent` only when every original recipient is accepted. SMTP acceptance means the server accepted the message. Confirm inbox receipt separately if required. Use deployment-test fixtures and the existing accepted synthetic email evidence for verification.
@@ -62,6 +88,8 @@ Use the Neon project metrics for quota checks. Where Function billing telemetry 
 Set saved `emailEnabled=false` in Settings and verify the value. The worker rechecks that saved permission before SMTP submission. An attempt already submitted to SMTP may still finish. Between invocations, deploy the same package with `EMAIL_NOTIFICATIONS_ENABLED=false` and clear `NEON_GMAIL_APP_PASSWORD` and `NEON_EMAIL_ACTIVATED_AT` with empty values. Verify the next monitoring run and heartbeat. Keep `NEON_WORKER_ENABLED=true` and the schedule enabled. A later email restart needs a fresh cutoff and separate approval.
 
 ### Recipient reconciliation and retries
+
+During daily review, compare the latest successful monitoring log with the scheduled slot and the worker heartbeat. For each new eligible publication, match its update ID to the recipient journal and notification history. If no publication qualifies, a successful scrape with unchanged notification history is expected. Investigate a partial result, missing heartbeat, unexpected recipient or attempted historical delivery before requesting any retry. Use the email-only stop for an unexplained send while leaving monitoring available.
 
 The journal uses the existing `config` table with one `neon_email_delivery_v1:<update-id>` key per attempted publication. The history table contains a summary per attempt. The journal records accepted, rejected, pending and ambiguous states per recipient. Inspect it in an authorized read-only session.
 
